@@ -1,4 +1,34 @@
-# Copyright (c) 2022-2025, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# Copyright (c) 2022-2024, The Isaac Lab Project Developers.
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
+
+from .inhand_manipulation_env import InHandManipulationEnv
+
+from .inhand_manipulation_real_env import InHandManipulationRealEnv
+
+from .inhand_manipulation_real_hand_init_pc_tactile_singlecam_env import InHandManipulationRealHandInitPCTactileSingleCamEnv
+
+from .inhand_manipulation_real_hand_init_pc_tactile_singlecam_env_givenstep import InHandManipulationRealHandInitPCTactileSingleCamGivenStepEnv
+
+# add our custom environment
+from .inhand_manipulation_singlegoal_env import InHandManipulationSingleGoalEnv
+
+from .inhand_manipulation_hand_init import InHandManipulationHandInitEnv
+
+from .inhand_manipulation_singlegoal_pc_env import InHandManipulationSingleGoalPCEnv
+
+from .inhand_manipulation_hand_init_pc_env import InHandManipulationHandInitPCEnv
+
+from .inhand_manipulation_hand_init_pc_env_givenstep import InHandManipulationHandInitPCGivenStepEnv
+
+from .inhand_manipulation_hand_init_pc_tactile_env import InHandManipulationHandInitPCTactileEnv
+
+from .inhand_manipulation_hand_init_pc_tactile_env_givenstep import InHandManipulationHandInitPCTactileGivenStepEnv
+
+from .inhand_manipulation_hand_init_pc_singlecam_env import InHandManipulationHandInitPCSingleCamEnv
+
+from .inhand_manipulation_hand_init_pc_tactile_singlecam_env import InHandManipulationHandInitPCTactileSingleCamEnv
+
+
+from .inhand_manipulation_hand_init_pc_tactile_singlecam_env_givenstep import InHandManipulationHandInitPCTactileSingleCamGivenStepEnv

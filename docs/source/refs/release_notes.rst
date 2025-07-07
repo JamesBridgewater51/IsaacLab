@@ -448,7 +448,7 @@ Isaac Lab extensions have been renamed to:
 
 * ``omni.isaac.lab`` --> :mod:`isaaclab`
 * ``omni.isaac.lab_assets`` --> :mod:`isaaclab_assets`
-* ``omni.isaac.lab_tasks`` --> :mod:`isaaclab_tasks`
+* ``isaaclab_tasks`` --> :mod:`isaaclab_tasks`
 
 In addition, we have split up the previous ``source/standalone/workflows`` directory into ``scripts/imitation_learning``
 and ``scripts/reinforcement_learning`` directories. The RSL RL, Stable-Baselines, RL_Games, SKRL, and Ray directories
@@ -652,7 +652,7 @@ Improvements
 * Inverts SE-2 keyboard device actions (Z, X)  for yaw command by @riccardorancan in https://github.com/isaac-sim/IsaacLab/pull/1030
 * Disables backward pass compilation of warp kernels by @Mayankm96 in https://github.com/isaac-sim/IsaacLab/pull/1222
 * Replaces TensorDict with native dictionary by @Toni-SM in https://github.com/isaac-sim/IsaacLab/pull/1348
-* Improves omni.isaac.lab_tasks loading time by @Toni-SM in https://github.com/isaac-sim/IsaacLab/pull/1353
+* Improves isaaclab_tasks loading time by @Toni-SM in https://github.com/isaac-sim/IsaacLab/pull/1353
 * Caches PhysX view's joint paths when processing fixed articulation tendons by @Toni-SM in https://github.com/isaac-sim/IsaacLab/pull/1347
 * Replaces hardcoded module paths with ``__name__`` dunder by @Mayankm96 in https://github.com/isaac-sim/IsaacLab/pull/1357
 * Expands observation term scaling to support list of floats by @pascal-roth in https://github.com/isaac-sim/IsaacLab/pull/1269
@@ -983,7 +983,7 @@ As notified in previous releases, we removed the classes and attributes marked a
 * The ``mdp.add_body_mass`` method in the events. Please use the ``mdp.randomize_rigid_body_mass`` instead.
 * The classes ``managers.RandomizationManager`` and ``managers.RandomizationTermCfg``. Please use the
   ``managers.EventManager`` and ``managers.EventTermCfg`` classes instead.
-* The following properties in ``omni.isaac.lab.sensors.FrameTransformerData``:
+* The following properties in ``isaaclab.sensors.FrameTransformerData``:
   * ``target_rot_source`` --> ``target_quat_w``
   * ``target_rot_w`` --> ``target_quat_source``
   * ``source_rot_w`` --> ``source_quat_w``

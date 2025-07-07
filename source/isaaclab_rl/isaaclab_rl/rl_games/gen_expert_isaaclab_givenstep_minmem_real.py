@@ -1,0 +1,842 @@
+"""Script to play a checkpoint if an RL agent from RL-Games, add the pc implement by STCZZZ"""
+
+"""Launch Isaac Sim Simulator first."""
+
+# import os
+# from termcolor import cprint
+# cprint(f"os.path.curdir: {os.path.abspath(os.path.curdir)}", "cyan") # /home/minghao/src/robotflow/cfm_isaac/third_party/IsaacLab
+
+import argparse
+
+from omni.isaac.lab.app import AppLauncher
+
+# add argparse arguments
+parser = argparse.ArgumentParser(description="Play a checkpoint of an RL agent from RL-Games.")
+parser.add_argument(
+    "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
+)
+parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
+parser.add_argument("--task", type=str, default=None, help="Name of the task.")
+parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint.")
+parser.add_argument(
+    "--use_last_checkpoint",
+    action="store_true",
+    help="When no checkpoint provided, use the last saved model. Otherwise use the best saved model.",
+)
+
+
+# add params
+parser.add_argument("--num_points", type=int, default=1024, help="Number of Points to crop.")
+parser.add_argument("--camera_debug", action="store_true", default=False, help="Enable camera debugging.")
+parser.add_argument("--point_cloud_debug", action="store_true", default=False, help="Enable point cloud debugging.")
+parser.add_argument("--num_episodes", type=int, default=5, help="Number of episodes to play.")
+parser.add_argument("--root_dir", type=str, default="3D-Conditional-Flow-Matching/data/", help="Root directory to save data.")
+
+parser.add_argument("--task_name", type=str, default="cube", help="Name of the task.")
+
+parser.add_argument("--step_every", type=int, default=None, help="Additional arguments to pass to the task")
+
+parser.add_argument("--zarr_info", type=str, default="", help="information about zarr data")
+
+parser.add_argument("--max_episode_steps", type=int, default=100, help="")
+
+parser.add_argument("--episode_success_threshold", type=float, default=20, help="")
+
+parser.add_argument("--record_tactile", action="store_true", default=False, help="Enable point cloud debugging.")
+
+parser.add_argument("--store_every", type=int, default=100, help="")
+parser.add_argument("--backup_every", type=int, default=200, help="")
+parser.add_argument("--record_tail_steps", type=int, default=-1, help="The num of steps to record after success, to enhance stability")
+
+parser.add_argument("--camera_numbers", type=int, default=2, help="number of cameras, used for camera debug")
+
+parser.add_argument("--record_rgba", action="store_true", default=False, help="Enable record_rgba.")
+
+
+
+
+AppLauncher.add_app_launcher_args(parser)
+# parse the arguments
+args_cli = parser.parse_args()
+from termcolor import cprint
+cprint(f"args_cli: {args_cli}", "cyan")
+
+# launch omniverse app
+app_launcher = AppLauncher(args_cli)
+simulation_app = app_launcher.app
+
+'''check the environment name !!'''
+assert(args_cli.task in [
+     "Isaac-Repose-Cube-Shadow-OpenAI-Direct-Real-HandInit-PointCloud-Tactile-GivenStep-v0",
+     "Isaac-Repose-Cube-Shadow-OpenAI-Direct-Real-HandInit-PointCloud-Tactile-v0",
+     "Isaac-Repose-Cube-Shadow-OpenAI-Direct-Real-HandInit-PointCloud-Tactile-GivenStep-SingleGoal-v0",
+     ])
+
+"""Rest everything follows."""
+import gymnasium as gym
+import math
+import os
+import torch
+
+from rl_games.common import env_configurations, vecenv
+from rl_games.common.player import BasePlayer
+from rl_games.torch_runner import Runner
+
+from omni.isaac.lab.utils.assets import retrieve_file_path
+from omni.isaac.lab.utils.dict import print_dict
+
+import omni.isaac.lab_tasks  # noqa: F401
+from omni.isaac.lab_tasks.utils import get_checkpoint_path, load_cfg_from_registry, parse_env_cfg
+from omni.isaac.lab_tasks.utils.wrappers.rl_games import RlGamesGpuEnv, RlGamesVecEnvWrapper
+
+# add imports
+from termcolor import cprint
+from omni.isaac.lab.sensors.camera.utils import create_pointcloud_from_rgbd
+import matplotlib.pyplot as plt
+import open3d as o3d
+import copy
+import zarr
+import numpy as np
+import time
+
+from conditional_flow_matching.common.replay_buffer import ReplayBuffer
+
+
+
+''' define these functions and class here for convenience, and maybe we can move them to a separate file later'''
+class PointcloudVisualizer() :
+	def __init__(self) -> None:
+		self.vis = o3d.visualization.VisualizerWithKeyCallback()
+		self.vis.create_window()
+		# self.vis.register_key_callback(key, your_update_function)
+	
+	def add_geometry(self, cloud) :
+		self.vis.add_geometry(cloud)
+
+	def update(self, cloud):
+		#Your update routine
+		self.vis.update_geometry(cloud)
+		self.vis.update_renderer()
+		self.vis.poll_events()
+
+
+def farthest_point_sampling(point_cloud, num_points):
+        """
+        使用Open3D库进行最远点采样
+
+        参数：
+            point_cloud (numpy.array): 表示点云的NumPy数组，每一行是一个点的坐标 [x, y, z]
+            num_points (int): 采样点的数量
+
+        返回：
+            numpy.array: 采样后的点云数组，每一行是一个采样点的坐标 [x, y, z]
+        """
+        sampled_points = o3d.geometry.PointCloud.farthest_point_down_sample(point_cloud, num_points)
+        # return point_cloud
+
+
+        return sampled_points
+
+
+def fullfill_list(lst, every, total_length):
+    if len(lst) > total_length:
+        return lst
+    else:
+        while len(lst) < total_length:
+            for i in range(every):
+                lst.append(lst[-(every - i)])
+        return lst
+
+def main():
+    """Play with RL-Games agent."""
+    # parse env configuration
+    env_cfg = parse_env_cfg(
+        args_cli.task, device=args_cli.device, num_envs=args_cli.num_envs, use_fabric=not args_cli.disable_fabric
+    )
+    agent_cfg = load_cfg_from_registry(args_cli.task, "rl_games_cfg_entry_point")
+
+    # specify directory for logging experiments
+    log_root_path = os.path.join("logs", "rl_games", agent_cfg["params"]["config"]["name"]) 
+    log_root_path = os.path.abspath(log_root_path)
+    print(f"[INFO] Loading experiment from directory: {log_root_path}")
+    # find checkpoint
+    if args_cli.checkpoint is None:
+        # specify directory for logging runs
+        run_dir = agent_cfg["params"]["config"].get("full_experiment_name", ".*")
+        # specify name of checkpoint
+        if args_cli.use_last_checkpoint:
+            checkpoint_file = ".*"
+        else:
+            # this loads the best checkpoint
+            checkpoint_file = f"{agent_cfg['params']['config']['name']}.pth"
+        # get path to previous checkpoint
+        resume_path = get_checkpoint_path(log_root_path, run_dir, checkpoint_file, other_dirs=["nn"])
+    else:
+        resume_path = retrieve_file_path(args_cli.checkpoint)
+
+    # wrap around environment for rl-games
+    rl_device = agent_cfg["params"]["config"]["device"]
+    clip_obs = agent_cfg["params"]["env"].get("clip_observations", math.inf)
+    clip_actions = agent_cfg["params"]["env"].get("clip_actions", math.inf)
+
+    # create isaac environment
+    env = gym.make(args_cli.task, cfg=env_cfg, render_mode = None)
+
+    # wrap around environment for rl-games
+    env = RlGamesVecEnvWrapper(env, rl_device, clip_obs, clip_actions)
+
+    # register the environment to rl-games registry
+    # note: in agents configuration: environment name must be "rlgpu"
+    vecenv.register(
+        "IsaacRlgWrapper", lambda config_name, num_actors, **kwargs: RlGamesGpuEnv(config_name, num_actors, **kwargs)
+    )
+    env_configurations.register("rlgpu", {"vecenv_type": "IsaacRlgWrapper", "env_creator": lambda **kwargs: env})
+
+    # load previously trained model
+    agent_cfg["params"]["load_checkpoint"] = True
+    agent_cfg["params"]["load_path"] = resume_path
+    print(f"[INFO]: Loading model checkpoint from: {agent_cfg['params']['load_path']}")
+
+    # set number of actors into agent config
+    agent_cfg["params"]["config"]["num_actors"] = env.unwrapped.num_envs
+    # create runner from rl-games
+    runner = Runner()
+    runner.load(agent_cfg)
+    # obtain the agent from the runner
+    agent: BasePlayer = runner.create_player()
+    agent.restore(resume_path)
+    agent.reset()
+
+    
+    ''' Modified to visualize PC'''
+
+    # I kept the two divisions the same in order to avoid bugs while emphasising the control of "PC_debug" here
+    if args_cli.point_cloud_debug:
+        # initialize point cloud visualizer
+
+        ### comment out for now
+        pointCloudVisualizer = PointcloudVisualizer()
+        pointCloudVisualizerInitialized = False
+        o3d_pc = o3d.geometry.PointCloud()
+        o3d_sampled = o3d.geometry.PointCloud()
+    else:   
+        o3d_pc = o3d.geometry.PointCloud()
+        o3d_sampled = o3d.geometry.PointCloud()
+    
+    # initialize the camera_numbers
+    camera_numbers = args_cli.camera_numbers
+
+    if args_cli.camera_debug:
+        fig, axes = plt.subplots(camera_numbers, 2)   # axes shape: (camera_numbers, 2)
+        if camera_numbers == 1: 
+            axes = [axes]
+
+    # initialize the pointcloud, state, action... buffer here. We only implement a one-env version here. 
+    pointcloud_list = []
+    goal_point_cloud_list = []
+    rendered_point_cloud_list = []
+    goal_rot_list = []
+    state_list = []
+    obs_list = []
+    action_list = []
+    episode_ends_list = []
+    agent_pos_list = []
+    point_cloud_tensor_true_list = []
+
+    if args_cli.record_tactile:
+        tactile_list = []
+    if args_cli.record_rgba:
+        rgba_list = []
+
+    global_steps = 0
+    episode_cnt = 0
+    num_episodes = args_cli.num_episodes
+    success = False
+
+    pointcloud_list_sub = []
+    goal_point_cloud_list_sub = []
+    rendered_point_cloud_list_sub = []
+    goal_rot_list_sub = []
+    state_list_sub = []
+    obs_list_sub = []
+    action_list_sub = []
+    agent_pos_list_sub = []
+    point_cloud_tensor_true_list_sub = []
+    if args_cli.record_tactile:
+        tactile_list_sub = []
+    if args_cli.record_rgba:
+        rgba_list_sub = []
+
+    total_try_times = 0
+
+    save_dir = os.path.join(args_cli.root_dir, 'isaaclab_'+ args_cli.task_name+ f'_expert{args_cli.zarr_info}.zarr')
+    backup_dir = os.path.join(args_cli.root_dir, 'isaaclab_'+ args_cli.task_name+ f'_expert{args_cli.zarr_info}_backup.zarr')
+    if os.path.exists(save_dir):
+        cprint('Data already exists at {}'.format(save_dir), 'red')
+        cprint("If you want to overwrite, delete the existing directory first.", "red")
+        cprint("Do you want to overwrite? (y/n)", "red")
+        user_input = 'y'
+        if user_input == 'y':
+            cprint('Overwriting {}'.format(save_dir), 'red')
+            os.system('rm -rf {}'.format(save_dir))
+        else:
+            cprint('Exiting', 'red')
+            return 
+    
+    # if zarr file does not exist, create it      
+
+    
+    zarr_root = zarr.group(save_dir)
+    zarr_data = zarr_root.create_group('data')
+    zarr_meta = zarr_root.create_group('meta')
+    compressor = zarr.Blosc(cname='zstd', clevel=3, shuffle=1)
+    saved_zarr = False
+
+    data_keys = ['pointcloud', 'goal_point_cloud', 'rendered_point_cloud', 'goal_rot', 'state', 'obs', 'action', 'agent_pos']
+    if args_cli.record_tactile:
+        data_keys.append('tactile')
+    if args_cli.record_rgba:
+        data_keys.append('rgba')
+    meta_keys = ['episode_ends']
+
+    
+    # record episode timeout and failed
+    episode_timeout = False
+    episode_failed = False
+    episode_success = False
+        
+
+    while simulation_app.is_running() and episode_cnt < num_episodes:
+
+        # run everything in inference mode
+        with torch.inference_mode():
+
+            cprint(f"*"*30 + "begining of one trial" + "*"*30, "grey")
+
+            total_try_times += 1
+        
+            episode_success_steps = 0
+
+            # reset environment
+            obs = env.reset()
+            cprint(f"resetting!! ", "cyan")
+            if isinstance(obs, dict):
+                obs_torch = obs["obs"]
+            # required: enables the flag for batched observations
+            _ = agent.get_batch_size(obs_torch, 1)
+
+
+            # reset sub lists 
+            pointcloud_list_sub.clear()
+            goal_point_cloud_list_sub.clear()
+            rendered_point_cloud_list_sub.clear()
+            goal_rot_list_sub.clear()
+            state_list_sub.clear()
+            obs_list_sub.clear()
+            action_list_sub.clear()
+            agent_pos_list_sub.clear()
+            point_cloud_tensor_true_list_sub.clear()
+            if args_cli.record_tactile:
+                tactile_list_sub.clear()   
+            if args_cli.record_rgba:
+                rgba_list_sub.clear()
+
+            while len(action_list_sub) < args_cli.max_episode_steps:
+
+            
+                # convert obs to agent format
+                obs_torch = agent.obs_to_torch(obs)  
+
+                if "OpenAI" in args_cli.task and "Direct" in args_cli.task:  # use openai env, we need to check the noise, i.e., obs[state]'s obj_pos == obs[obs]'s obj_pos
+                    state_check = obs['states']
+                    obj_pos = state_check[..., 48:51].squeeze(0)
+                    obj_rot = state_check[..., 51:55].squeeze(0)
+
+
+                    # assert(torch.all(obj_pos == obj_pos_pred))
+                    # assert(torch.all(Q == Q_pred))
+                    # assert(torch.all(action_state == action_obs))
+                    if len(state_list_sub ) == 0: 
+                        cprint(f"[IsaaclabRunner] obj_pos, obj_rot: {obj_pos}, {obj_rot}", 'yellow')
+                # cprint(f"[IsaaclabRunner] all assertions passed", 'yellow')
+                else:  # use direct env
+                    obs['states'] = obs['obs']
+                    state_check = obs['obs']
+                    obj_pos = state_check[..., 48:51].squeeze(0)
+                    obj_rot = state_check[..., 51:55].squeeze(0)
+                    if len(state_list_sub ) == 0: 
+                        cprint(f"[IsaaclabRunner] obj_pos, obj_rot: {obj_pos}, {obj_rot}", 'yellow') # no problem
+
+                
+                state_list_sub.append(obs['states'].squeeze(0).detach().cpu().numpy())
+                obs_list_sub.append(obs['obs'].squeeze(0).detach().cpu().numpy())
+                agent_pos_list_sub.append(obs['agent_pos'].squeeze(0).detach().cpu().numpy())
+
+                if args_cli.record_tactile:
+                    contact_forces = obs['contact_forces']
+                    # cprint(f"[Isaaclab_runner] contact_forces.shape: {contact_forces.squeeze(0).shape}", 'yellow')
+                    # cprint(f"[Isaaclab_runner] contact_forces.range: [{torch.min(contact_forces)}, {torch.max(contact_forces)}]", 'yellow')
+                    tactile_list_sub.append(contact_forces.squeeze(0).detach().cpu().numpy())
+                
+                if args_cli.record_rgba:
+                    rgba = obs['rgba_img_00']
+                    rgba_list_sub.append(rgba.squeeze(0).detach().cpu().numpy())
+
+
+
+                ''' The PC part, add by STCZZZ'''
+                
+                # generate pc and collect it into the pointcloud_list_sub
+                for env_id in range(args_cli.num_envs):
+                    # points_all, colors_all = get_pc_and_color(obs, env_id, camera_numbers)
+                    points_all = obs["point_cloud"][env_id][..., :3]
+                    colors_all = obs["point_cloud"][env_id][..., 3:]
+                    # cprint(f"points_all.shape: {points_all.shape}", "cyan")  # depends on the precision of the camera
+                    points_env = o3d.geometry.PointCloud()
+                    points_env.points = o3d.utility.Vector3dVector(points_all.detach().cpu().numpy())
+                    points_env.colors = o3d.utility.Vector3dVector(colors_all.detach().cpu().numpy())
+                    # farthest point sampling
+                    points_env = farthest_point_sampling(points_env, args_cli.num_points)
+                    # combine points and colors
+
+                    # 
+                    combined_points_colors = np.concatenate([np.asarray(points_env.points), np.asarray(points_env.colors)], axis=1)
+                    points_colors_all = torch.tensor(combined_points_colors)
+                    # cprint(f"points_colors_all.shape: {points_colors_all.shape}", "cyan")  # [2048, 6]
+                    pointcloud_list_sub.append(points_colors_all.squeeze(0).detach().cpu().numpy())
+                    goal_point_cloud_list_sub.append(obs["goal_point_cloud"].squeeze(0).detach().cpu().numpy())
+                    rendered_point_cloud_list_sub.append(obs["point_cloud_sky"].squeeze(0).detach().cpu().numpy())
+                    goal_rot_list_sub.append(obs["goal_rot"].squeeze(0).detach().cpu().numpy())
+                    point_cloud_tensor_true_list_sub.append(obs["point_cloud_tensor_true"].squeeze(0).detach().cpu().numpy())
+                
+                # for(key, value) in obs.items():
+                #     cprint(f"{key}: {value.shape}", "cyan")
+                #     if isinstance(value, torch.Tensor) and len(value.shape) >= 2:
+                #         cprint(f"range({key}): [{torch.min(value)}~{torch.max(value)}]", "cyan")
+                # cprint(f"*" * 50, "grey")
+
+                # visualize image and pc if neede
+                if args_cli.camera_debug:
+                    
+                    for cam_id in range(camera_numbers):
+                        # visualize the depth img
+                        depth_example = obs[f"depth_img_0{cam_id}"][0]
+                        rgba_example = obs[f"rgba_img_0{cam_id}"][0][..., :3]
+                        ax1 = axes[cam_id][0]
+                        ax2 = axes[cam_id][1]
+                        ax1.imshow(depth_example.detach().cpu().numpy())
+                        ax1.set_title(f'Depth Image_{cam_id}')
+                        ax2.imshow(rgba_example.detach().cpu().numpy())
+                        ax2.set_title(f'RGBA Image_{cam_id}')
+                    plt.pause(1e-9)
+                
+                if args_cli.point_cloud_debug:
+                    
+                    # points_example, colors_example = get_pc_and_color(obs, 0, camera_numbers)
+                    points_example = obs["point_cloud"][0][..., :3]
+                    colors_example = obs["point_cloud"][0][..., 3:]
+
+                    colors_example = colors_example.float() / 255   # normalize to 0~1 to fit open3d's requirement
+
+                    # visualize point cloud
+                    points_xyz_numpy = points_example.detach().cpu().numpy()
+                    points_rgb_numpy = colors_example.detach().cpu().numpy()
+
+                    # change the cordinate between IsaacLab and Open3d
+                    selected_points = points_xyz_numpy[:, [1, 2, 0]]
+                    selected_points_color = points_rgb_numpy
+                    selected_points[:, 2] = -selected_points[:, 2]
+                    selected_points[:, 0] = -selected_points[:, 0]
+                
+                    o3d_pc.points = o3d.utility.Vector3dVector(selected_points)
+                    o3d_pc.colors = o3d.utility.Vector3dVector(selected_points_color)  
+                    o3d_pc_tmp = farthest_point_sampling(o3d_pc, args_cli.num_points)
+                    o3d_sampled.points, o3d_sampled.colors = o3d_pc_tmp.points, o3d_pc_tmp.colors
+
+                    if pointCloudVisualizerInitialized == False :
+                        pointCloudVisualizer.add_geometry(o3d_sampled)
+                        pointCloudVisualizerInitialized = True
+                    else :
+                        pointCloudVisualizer.update(o3d_sampled)
+
+                    # if len(pointcloud_list_sub) < 4 or len(pointcloud_list_sub) % 4 == 0:
+                    #     o3d.visualization.draw_geometries([o3d_sampled])
+                
+
+                # agent stepping   modified
+                actions = agent.get_action(obs_torch, is_deterministic=True)
+                action_list_sub.append(actions.detach().cpu().numpy().squeeze(0))
+                # env stepping
+                obs, reward, dones, extras = env.step(actions)
+
+
+                # visualize pc after stepping!!!  
+
+                if args_cli.point_cloud_debug:
+                    
+                    # points_example, colors_example = get_pc_and_color(obs, 0, camera_numbers)
+                    points_all = obs["point_cloud"][env_id][..., :3]
+                    colors_all = obs["point_cloud"][env_id][..., 3:]
+
+                    colors_example = colors_example.float() / 255   # normalize to 0~1 to fit open3d's requirement
+
+                    # visualize point cloud
+                    points_xyz_numpy = points_example.detach().cpu().numpy()
+                    points_rgb_numpy = colors_example.detach().cpu().numpy()
+
+                    # change the cordinate between IsaacLab and Open3d
+                    selected_points = points_xyz_numpy[:, [1, 2, 0]]
+                    selected_points_color = points_rgb_numpy
+                    selected_points[:, 2] = -selected_points[:, 2]
+                    selected_points[:, 0] = -selected_points[:, 0]
+                
+                    o3d_pc.points = o3d.utility.Vector3dVector(selected_points)
+                    o3d_pc.colors = o3d.utility.Vector3dVector(selected_points_color)  
+                    o3d_pc_tmp = farthest_point_sampling(o3d_pc, args_cli.num_points)
+                    o3d_sampled.points, o3d_sampled.colors = o3d_pc_tmp.points, o3d_pc_tmp.colors
+
+
+                goal_env_ids = obs['goal_env_ids']
+                success = len(goal_env_ids) > 0
+
+                if success:  # do not record data here
+
+                    # cprint(f"success: {episode_success_steps}", "green")
+                    episode_success_steps += 1
+                
+
+                if len(pointcloud_list_sub) == args_cli.max_episode_steps:  # timeout to check the success time and record
+                     
+                    if episode_success_steps > args_cli.episode_success_threshold:
+                        
+                        # reset flags
+                        episode_timeout = False
+                        episode_failed = False
+                        episode_success = True
+
+                        cprint(f"step success in episode {episode_cnt}, reward: {reward}, success_steps: {episode_success_steps}", "green")
+                        cprint(f"Episode steps: {len(action_list_sub)}", "green")
+
+                        episode_cnt += 1
+                        
+                        # expand the sub lists
+                        if args_cli.step_every is not None:
+                            pointcloud_list_sub = fullfill_list(pointcloud_list_sub, 1, args_cli.step_every)
+                            goal_point_cloud_list_sub = fullfill_list(goal_point_cloud_list_sub, 1, args_cli.step_every)
+                            rendered_point_cloud_list_sub = fullfill_list(rendered_point_cloud_list_sub, 1, args_cli.step_every)
+                            goal_rot_list_sub = fullfill_list(goal_rot_list_sub, 1, args_cli.step_every)
+                            state_list_sub = fullfill_list(state_list_sub, 1, args_cli.step_every)
+                            obs_list_sub = fullfill_list(obs_list_sub, 1, args_cli.step_every)
+                            action_list_sub = fullfill_list(action_list_sub, 1, args_cli.step_every)
+                            agent_pos_list_sub = fullfill_list(agent_pos_list_sub, 1, args_cli.step_every)
+                            point_cloud_tensor_true_list_sub = fullfill_list(point_cloud_tensor_true_list_sub, 1, args_cli.step_every)
+                            if args_cli.record_tactile:
+                                tactile_list_sub = fullfill_list(tactile_list_sub, 1, args_cli.step_every)
+                            if args_cli.record_rgba:
+                                rgba_list_sub = fullfill_list(rgba_list_sub, 1, args_cli.step_every)
+                        
+
+                        # record the episode
+                        if args_cli.record_tail_steps == -1:
+                            global_steps += len(action_list_sub)
+                            episode_ends_list.append(global_steps)
+                            
+                            pointcloud_list.extend(copy.deepcopy(pointcloud_list_sub))
+                            goal_point_cloud_list.extend(copy.deepcopy(goal_point_cloud_list_sub))
+                            rendered_point_cloud_list.extend(copy.deepcopy(rendered_point_cloud_list_sub))
+                            goal_rot_list.extend(copy.deepcopy(goal_rot_list_sub))
+                            state_list.extend(copy.deepcopy(state_list_sub))
+                            obs_list.extend(copy.deepcopy(obs_list_sub))
+                            action_list.extend(copy.deepcopy(action_list_sub))
+                            agent_pos_list.extend(copy.deepcopy(agent_pos_list_sub))
+                            point_cloud_tensor_true_list.extend(copy.deepcopy(point_cloud_tensor_true_list_sub))
+                            if args_cli.record_tactile:
+                                cprint(f"recording tactile_list_sub, len(sub): {len(tactile_list_sub)}", "cyan")
+                                tactile_list.extend(copy.deepcopy(tactile_list_sub))
+                                cprint(f"recording tactile_list, len(list): {len(tactile_list)}", "cyan")
+                            if args_cli.record_rgba:
+                                rgba_list.extend(copy.deepcopy(rgba_list_sub))
+
+                        elif args_cli.record_tail_steps >= 0:
+                            record_steps = min(len(pointcloud_list_sub) - episode_success_steps + args_cli.record_tail_steps, len(pointcloud_list_sub))
+
+                            global_steps += record_steps
+                            episode_ends_list.append(global_steps)
+
+                            pointcloud_list.extend(copy.deepcopy(pointcloud_list_sub[:record_steps]))
+                            goal_point_cloud_list.extend(copy.deepcopy(goal_point_cloud_list_sub[:record_steps]))
+                            rendered_point_cloud_list.extend(copy.deepcopy(rendered_point_cloud_list_sub[:record_steps]))
+                            goal_rot_list.extend(copy.deepcopy(goal_rot_list_sub[:record_steps]))
+                            state_list.extend(copy.deepcopy(state_list_sub[:record_steps]))
+                            obs_list.extend(copy.deepcopy(obs_list_sub[:record_steps]))
+                            action_list.extend(copy.deepcopy(action_list_sub[:record_steps]))
+                            agent_pos_list.extend(copy.deepcopy(agent_pos_list_sub[:record_steps]))
+                            point_cloud_tensor_true_list.extend(copy.deepcopy(point_cloud_tensor_true_list_sub[:record_steps]))
+                            if args_cli.record_tactile:
+                                cprint(f"recording tactile_list_sub, len(sub): {record_steps}", "cyan")
+                                tactile_list.extend(copy.deepcopy(tactile_list_sub[:len(tactile_list_sub) - episode_success_steps + args_cli.record_tail_steps]))
+                                cprint(f"recording tactile_list, len(list): {len(tactile_list)}", "cyan")
+                            if args_cli.record_rgba:
+                                rgba_list.extend(copy.deepcopy(rgba_list_sub[:record_steps]))
+                            
+                                                    
+                        else :
+                            raise ValueError("record_tail_steps must be -1 or >= 0")
+
+                        # reset lists
+                        pointcloud_list_sub.clear()
+                        goal_point_cloud_list_sub.clear()
+                        rendered_point_cloud_list_sub.clear()
+                        goal_rot_list_sub.clear()
+                        state_list_sub.clear()
+                        obs_list_sub.clear()
+                        action_list_sub.clear()
+                        agent_pos_list_sub.clear()
+                        point_cloud_tensor_true_list_sub.clear()
+
+                        if args_cli.record_tactile:
+                            tactile_list_sub.clear()
+                        if args_cli.record_rgba:
+                            rgba_list_sub.clear()
+                    
+                    else:
+
+                        # set the flags
+                        episode_timeout = True
+                        episode_failed = False
+                        episode_success = False
+
+                        cprint(f"step TIMEOUT in episode {episode_cnt}, reward: {reward}, episode_success_steps: {episode_success_steps}", "red")
+                        cprint(f"Episode steps: {len(action_list_sub)}", "red")
+                        # do nothing
+                        pass  
+
+                    break      # break out of this cycle, the clear job is left to the outwards of the cycle        
+                
+                if dones[0] : # timeout or failed FAILED ONLY HERE SINCE WE GUARENTEE "TIME OUT" STEP IS PROCESSED EARLIER
+                    episode_failed = True
+                    episode_timeout = False
+                    episode_success = False
+                    
+                    cprint(f"Episode: {episode_cnt} FAILED, reward: {reward}, Episode steps: {len(action_list_sub)}", "red")
+                    break   # break out of this cycle, the clear job is left to the outwards of the cycle 
+    
+
+        replay_buffer = None
+        if episode_cnt % args_cli.store_every == 0 and episode_success and (not episode_failed) and (not episode_timeout):  
+
+            cprint(f"saving data to zarr file...", "cyan")
+
+            store_start = time.time()
+
+            ###############################
+            # save data
+            ###############################
+            # check if save_dir exists
+
+            chunks_dict = dict()
+
+            if os.path.exists(save_dir) and saved_zarr:
+                # load zarr data from save_dir, and add arrays to it
+                keys = ['state', 'obs', 'point_cloud', 'action', 'agent_pos', 'goal_point_cloud', 'rendered_point_cloud', 'goal_rot', 'point_cloud_tensor_true']
+                if args_cli.record_tactile:
+                    keys.append('contact_forces')
+                if args_cli.record_rgba:
+                    keys.append('rgba')
+                replay_buffer = ReplayBuffer.copy_from_path(save_dir, keys=keys)
+
+            #     # load and delete
+            #     cprint('Overwriting {}'.format(save_dir), 'red')
+            #     os.system('rm -rf {}'.format(save_dir))
+
+            # else:
+            #     replay_buffer = None
+
+
+            if not saved_zarr:
+                zarr_file = None
+                zarr_backup_file = None
+            else:
+                zarr_file = zarr.open(save_dir, mode='a')
+                zarr_backup_file = zarr.open(backup_dir, mode='a')
+            
+
+            state_arrays = np.stack(state_list, axis=0)
+            state_chunk_size = (2000, state_arrays.shape[1])
+            zarr_state_arrays = zarr.array(state_arrays, chunks=state_chunk_size, compressor=compressor)
+            chunks_dict['state'] = state_chunk_size
+            if not saved_zarr:
+                zarr_data.create_dataset('state', data=state_arrays, chunks=state_chunk_size, dtype='float32', overwrite=True, compressor=compressor)
+            else:
+                zarr_file['data/state'].append(zarr_state_arrays)
+            cprint(f'state shape: {state_arrays.shape}, range: [{np.min(state_arrays)}, {np.max(state_arrays)}]', 'green')
+            state_list.clear()
+            del state_arrays
+            
+            obs_arrays = np.stack(obs_list, axis=0)
+            obs_size = (2000, obs_arrays.shape[1])
+            zarr_obs_arrays = zarr.array(obs_arrays, chunks=obs_size, compressor=compressor)
+            chunks_dict['obs'] = obs_size
+            if not saved_zarr:
+                zarr_data.create_dataset('obs', data=obs_arrays, chunks=obs_size, dtype='float32', overwrite=True, compressor=compressor)
+            else:
+                zarr_file['data/obs'].append(zarr_obs_arrays)
+            cprint(f'obs shape: {obs_arrays.shape}, range: [{np.min(obs_arrays)}, {np.max(obs_arrays)}]', 'green')
+            obs_list.clear()
+            del obs_arrays
+            
+            point_cloud_arrays = np.stack(pointcloud_list, axis=0)
+            point_cloud_chunk_size = (2000, point_cloud_arrays.shape[1], point_cloud_arrays.shape[2])
+            zarr_point_cloud_arrays = zarr.array(point_cloud_arrays, chunks=point_cloud_chunk_size, compressor=compressor)
+            chunks_dict['point_cloud'] = point_cloud_chunk_size
+            if not saved_zarr:
+                zarr_data.create_dataset('point_cloud', data=point_cloud_arrays, chunks=point_cloud_chunk_size, dtype='float32', overwrite=True, compressor=compressor)
+            else:
+                zarr_file['data/point_cloud'].append(zarr_point_cloud_arrays)
+            cprint(f'point_cloud shape: {point_cloud_arrays.shape}, range: [{np.min(point_cloud_arrays)}, {np.max(point_cloud_arrays)}]', 'green')
+            pointcloud_list.clear()
+            del point_cloud_arrays
+
+            point_cloud_tensor_true_arrays = np.stack(point_cloud_tensor_true_list, axis=0)
+            point_cloud_tensor_true_chunk_size = (2000, point_cloud_tensor_true_arrays.shape[1], point_cloud_tensor_true_arrays.shape[2])
+            zarr_point_cloud_tensor_true_arrays = zarr.array(point_cloud_tensor_true_arrays, chunks=point_cloud_tensor_true_chunk_size, compressor=compressor)
+            chunks_dict['point_cloud_tensor_true'] = point_cloud_tensor_true_chunk_size
+            if not saved_zarr:
+                zarr_data.create_dataset('point_cloud_tensor_true', data=point_cloud_tensor_true_arrays, chunks=point_cloud_tensor_true_chunk_size, dtype='float32', overwrite=True, compressor=compressor)
+            else:
+                zarr_file['data/point_cloud_tensor_true'].append(zarr_point_cloud_tensor_true_arrays)
+            cprint(f'point_cloud_tensor_true shape: {point_cloud_tensor_true_arrays.shape}, range: [{np.min(point_cloud_tensor_true_arrays)}, {np.max(point_cloud_tensor_true_arrays)}]', 'green')
+            point_cloud_tensor_true_list.clear()
+            del point_cloud_tensor_true_arrays
+
+
+            agent_pos_arrays = np.stack(agent_pos_list, axis=0)
+            agent_pos_chunk_size = (2000, agent_pos_arrays.shape[1])
+            zarr_agent_pos_arrays = zarr.array(agent_pos_arrays, chunks=agent_pos_chunk_size, compressor=compressor)
+            chunks_dict['agent_pos'] = agent_pos_chunk_size
+            if not saved_zarr:
+                zarr_data.create_dataset('agent_pos', data=agent_pos_arrays, chunks=agent_pos_chunk_size, dtype='float32', overwrite=True, compressor=compressor)
+            else:
+                zarr_file['data/agent_pos'].append(zarr_agent_pos_arrays)
+            cprint(f'agent_pos shape: {agent_pos_arrays.shape}, range: [{np.min(agent_pos_arrays)}, {np.max(agent_pos_arrays)}]', 'green')
+            agent_pos_list.clear()
+            del agent_pos_arrays
+
+            action_arrays = np.stack(action_list, axis=0)
+            action_chunk_size = (2000, action_arrays.shape[1])
+            zarr_action_arrays = zarr.array(action_arrays, chunks=action_chunk_size, compressor=compressor)
+            chunks_dict['action'] = action_chunk_size
+            if not saved_zarr:
+                zarr_data.create_dataset('action', data=action_arrays, chunks=action_chunk_size, dtype='float32', overwrite=True, compressor=compressor)
+            else:
+                zarr_file['data/action'].append(zarr_action_arrays)
+            cprint(f'action shape: {action_arrays.shape}, range: [{np.min(action_arrays)}, {np.max(action_arrays)}]', 'green')
+            action_list.clear()
+            del action_arrays
+
+            goal_point_cloud_arrays = np.stack(goal_point_cloud_list, axis=0)
+            goal_point_cloud_chunk_size = (2000, goal_point_cloud_arrays.shape[1], goal_point_cloud_arrays.shape[2])
+            zarr_goal_point_cloud_arrays = zarr.array(goal_point_cloud_arrays, chunks=goal_point_cloud_chunk_size, compressor=compressor)
+            chunks_dict['goal_point_cloud'] = goal_point_cloud_chunk_size
+            if not saved_zarr:
+                zarr_data.create_dataset('goal_point_cloud', data=goal_point_cloud_arrays, chunks=goal_point_cloud_chunk_size, dtype='float32', overwrite=True, compressor=compressor)
+            else:
+                zarr_file['data/goal_point_cloud'].append(zarr_goal_point_cloud_arrays)
+            cprint(f'goal_point_cloud shape: {goal_point_cloud_arrays.shape}, range: [{np.min(goal_point_cloud_arrays)}, {np.max(goal_point_cloud_arrays)}]', 'green')
+            goal_point_cloud_list.clear()
+            del goal_point_cloud_arrays
+
+            rendered_point_cloud_arrays = np.stack(rendered_point_cloud_list, axis=0)
+            rendered_point_cloud_chunk_size = (2000, rendered_point_cloud_arrays.shape[1], rendered_point_cloud_arrays.shape[2])
+            zarr_rendered_point_cloud_arrays = zarr.array(rendered_point_cloud_arrays, chunks=rendered_point_cloud_chunk_size, compressor=compressor)
+            chunks_dict['rendered_point_cloud'] = rendered_point_cloud_chunk_size
+            if not saved_zarr:
+                zarr_data.create_dataset('rendered_point_cloud', data=rendered_point_cloud_arrays, chunks=rendered_point_cloud_chunk_size, dtype='float32', overwrite=True, compressor=compressor)
+            else:
+                zarr_file['data/rendered_point_cloud'].append(zarr_rendered_point_cloud_arrays)
+            cprint(f'rendered_point_cloud shape: {rendered_point_cloud_arrays.shape}, range: [{np.min(rendered_point_cloud_arrays)}, {np.max(rendered_point_cloud_arrays)}]', 'green')
+            rendered_point_cloud_list.clear()
+            del rendered_point_cloud_arrays
+
+            goal_rot_arrays = np.stack(goal_rot_list, axis=0)
+            goal_rot_chunk_size = (2000, goal_rot_arrays.shape[1])
+            zarr_goal_rot_arrays = zarr.array(goal_rot_arrays, chunks=goal_rot_chunk_size, compressor=compressor)
+            chunks_dict['goal_rot'] = goal_rot_chunk_size
+            if not saved_zarr:
+                zarr_data.create_dataset('goal_rot', data=goal_rot_arrays, chunks=goal_rot_chunk_size, dtype='float32', overwrite=True, compressor=compressor)
+            else:
+                zarr_file['data/goal_rot'].append(zarr_goal_rot_arrays)
+            cprint(f'goal_rot shape: {goal_rot_arrays.shape}, range: [{np.min(goal_rot_arrays)}, {np.max(goal_rot_arrays)}]', 'green')
+            goal_rot_list.clear()
+            del goal_rot_arrays
+
+            if args_cli.record_tactile:
+                tactile_arrays = np.stack(tactile_list, axis=0)
+                tactile_chunk_size = (2000, tactile_arrays.shape[1], tactile_arrays.shape[2])
+                zarr_tactile_arrays = zarr.array(tactile_arrays, chunks=tactile_chunk_size, compressor=compressor)
+                chunks_dict['contact_forces'] = tactile_chunk_size
+                if not saved_zarr:
+                    zarr_data.create_dataset('contact_forces', data=tactile_arrays, chunks=tactile_chunk_size, dtype='float32', overwrite=True, compressor=compressor)
+                else:
+                    zarr_file['data/contact_forces'].append(zarr_tactile_arrays)
+                cprint(f'contact_forces shape: {tactile_arrays.shape}, range: [{np.min(tactile_arrays)}, {np.max(tactile_arrays)}]', 'green')
+                tactile_list.clear()
+                del tactile_arrays
+            
+            if args_cli.record_rgba:
+                rgba_arrays = np.stack(rgba_list, axis=0)
+                rgba_chunk_size = (50, rgba_arrays.shape[1], rgba_arrays.shape[2], rgba_arrays.shape[3])
+                zarr_rgba_arrays = zarr.array(rgba_arrays, chunks=rgba_chunk_size, compressor=compressor)
+                chunks_dict['rgba'] = rgba_chunk_size
+                cprint(f'rgba shape: {rgba_arrays.shape}, range: [{np.min(rgba_arrays)}, {np.max(rgba_arrays)}]', 'green')
+                cprint(f"dtype: {rgba_arrays.dtype}")
+                if not saved_zarr:
+                    zarr_data.create_dataset('rgba', data=rgba_arrays, chunks=rgba_chunk_size, dtype='uint8', overwrite=True, compressor=compressor)
+                else:
+                    zarr_file['data/rgba'].append(zarr_rgba_arrays)
+                rgba_list.clear()
+                del rgba_arrays
+
+            episode_ends_arrays = np.array(episode_ends_list)
+            # no chunk size
+            zarr_episode_ends_arrays = zarr.array(episode_ends_arrays, compressor=compressor)
+            if not saved_zarr:
+                zarr_meta.create_dataset('episode_ends', data=episode_ends_arrays, dtype='int64', overwrite=True, compressor=compressor)
+            else:
+                zarr_file['meta/episode_ends'].append(zarr_episode_ends_arrays)
+            cprint(f'episode_ends: {episode_ends_arrays}', 'green')
+            episode_ends_list.clear()
+            del episode_ends_arrays
+
+            if not saved_zarr:
+                saved_zarr = True
+
+
+            cprint(f'-'*50, 'cyan')
+            del zarr_file
+
+
+            store_end = time.time()
+            cprint(f"time used to save: {store_end - store_start}", "cyan")
+        
+            # backup 取公倍数
+            if episode_cnt % args_cli.backup_every == 0 and episode_success and (not episode_failed) and (not episode_timeout) and replay_buffer is not None:
+                copy_time_start = time.time()
+                # os.system(f'cp {save_dir} {backup_dir}')
+                replay_buffer.save_to_path(backup_dir, chunks=chunks_dict, compressors=compressor, if_exists='replace')
+                copy_time_end = time.time()
+                cprint(f"time used to copy: {copy_time_end - copy_time_start}", "cyan")
+        
+        if replay_buffer is not None:
+            del replay_buffer
+    
+    del zarr_root, zarr_data, zarr_meta
+    # close the simulator
+    env.close()
+
+
+if __name__ == "__main__":
+    # run the main function
+    main()
+    # close sim app
+    simulation_app.close()

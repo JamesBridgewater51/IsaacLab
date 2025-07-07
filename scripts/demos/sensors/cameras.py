@@ -80,7 +80,18 @@ class SensorsSceneCfg(InteractiveSceneCfg):
     robot: ArticulationCfg = ANYMAL_C_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
 
     # sensors
-    camera = CameraCfg(
+    # camera = TiledCameraCfg(
+    #     prim_path="{ENV_REGEX_NS}/Robot/base/front_cam",
+    #     update_period=0.1,
+    #     height=480,
+    #     width=640,
+    #     data_types=["rgb", "distance_to_image_plane"],
+    #     spawn=sim_utils.PinholeCameraCfg(
+    #         focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(0.1, 1.0e5)
+    #     ),
+    #     offset=CameraCfg.OffsetCfg(pos=(0.510, 0.0, 0.015), rot=(0.5, -0.5, 0.5, -0.5), convention="ros"),
+    # )
+    tiled_camera = TiledCameraCfg(
         prim_path="{ENV_REGEX_NS}/Robot/base/front_cam",
         update_period=0.1,
         height=480,
@@ -88,31 +99,22 @@ class SensorsSceneCfg(InteractiveSceneCfg):
         data_types=["rgb", "distance_to_image_plane"],
         spawn=sim_utils.PinholeCameraCfg(
             focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(0.1, 1.0e5)
-        ),
-        offset=CameraCfg.OffsetCfg(pos=(0.510, 0.0, 0.015), rot=(0.5, -0.5, 0.5, -0.5), convention="ros"),
-    )
-    tiled_camera = TiledCameraCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/base/front_cam",
-        update_period=0.1,
-        height=480,
-        width=640,
-        data_types=["rgb", "distance_to_image_plane"],
-        spawn=None,  # the camera is already spawned in the scene
+        ),  # the camera is already spawned in the scene
         offset=TiledCameraCfg.OffsetCfg(pos=(0.510, 0.0, 0.015), rot=(0.5, -0.5, 0.5, -0.5), convention="ros"),
     )
-    raycast_camera = RayCasterCameraCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/base",
-        mesh_prim_paths=["/World/ground"],
-        update_period=0.1,
-        offset=RayCasterCameraCfg.OffsetCfg(pos=(0.510, 0.0, 0.015), rot=(0.5, -0.5, 0.5, -0.5), convention="ros"),
-        data_types=["distance_to_image_plane", "normals"],
-        pattern_cfg=patterns.PinholeCameraPatternCfg(
-            focal_length=24.0,
-            horizontal_aperture=20.955,
-            height=480,
-            width=640,
-        ),
-    )
+    # raycast_camera = RayCasterCameraCfg(
+    #     prim_path="{ENV_REGEX_NS}/Robot/base",
+    #     mesh_prim_paths=["/World/ground"],
+    #     update_period=0.1,
+    #     offset=RayCasterCameraCfg.OffsetCfg(pos=(0.510, 0.0, 0.015), rot=(0.5, -0.5, 0.5, -0.5), convention="ros"),
+    #     data_types=["distance_to_image_plane", "normals"],
+    #     pattern_cfg=patterns.PinholeCameraPatternCfg(
+    #         focal_length=24.0,
+    #         horizontal_aperture=20.955,
+    #         height=480,
+    #         width=640,
+    #     ),
+    # )
 
 
 def save_images_grid(
@@ -215,41 +217,41 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         scene.update(sim_dt)
 
         # print information from the sensors
-        print("-------------------------------")
-        print(scene["camera"])
-        print("Received shape of rgb   image: ", scene["camera"].data.output["rgb"].shape)
-        print("Received shape of depth image: ", scene["camera"].data.output["distance_to_image_plane"].shape)
+        # print("-------------------------------")
+        # print(scene["camera"])
+        # print("Received shape of rgb   image: ", scene["camera"].data.output["rgb"].shape)
+        # print("Received shape of depth image: ", scene["camera"].data.output["distance_to_image_plane"].shape)
         print("-------------------------------")
         print(scene["tiled_camera"])
         print("Received shape of rgb   image: ", scene["tiled_camera"].data.output["rgb"].shape)
         print("Received shape of depth image: ", scene["tiled_camera"].data.output["distance_to_image_plane"].shape)
-        print("-------------------------------")
-        print(scene["raycast_camera"])
-        print("Received shape of depth: ", scene["raycast_camera"].data.output["distance_to_image_plane"].shape)
-        print("Received shape of normals: ", scene["raycast_camera"].data.output["normals"].shape)
+        # print("-------------------------------")
+        # print(scene["raycast_camera"])
+        # print("Received shape of depth: ", scene["raycast_camera"].data.output["distance_to_image_plane"].shape)
+        # print("Received shape of normals: ", scene["raycast_camera"].data.output["normals"].shape)
 
         # save every 10th image (for visualization purposes only)
         # note: saving images will slow down the simulation
         if count % 10 == 0:
             # compare generated RGB images across different cameras
-            rgb_images = [scene["camera"].data.output["rgb"][0, ..., :3], scene["tiled_camera"].data.output["rgb"][0]]
+            rgb_images = [scene["tiled_camera"].data.output["rgb"][0]]
             save_images_grid(
                 rgb_images,
-                subtitles=["Camera", "TiledCamera"],
+                subtitles=["TiledCamera"],
                 title="RGB Image: Cam0",
                 filename=os.path.join(output_dir, "rgb", f"{count:04d}.jpg"),
             )
 
             # compare generated Depth images across different cameras
             depth_images = [
-                scene["camera"].data.output["distance_to_image_plane"][0],
+                # scene["camera"].data.output["distance_to_image_plane"][0],
                 scene["tiled_camera"].data.output["distance_to_image_plane"][0, ..., 0],
-                scene["raycast_camera"].data.output["distance_to_image_plane"][0],
+                # scene["raycast_camera"].data.output["distance_to_image_plane"][0],
             ]
             save_images_grid(
                 depth_images,
                 cmap="turbo",
-                subtitles=["Camera", "TiledCamera", "RaycasterCamera"],
+                subtitles=["TiledCamera"],
                 title="Depth Image: Cam0",
                 filename=os.path.join(output_dir, "distance_to_camera", f"{count:04d}.jpg"),
             )
@@ -264,13 +266,13 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
             )
 
             # save all camera RGB images
-            cam_images = scene["camera"].data.output["rgb"][..., :3]
-            save_images_grid(
-                cam_images,
-                subtitles=[f"Cam{i}" for i in range(cam_images.shape[0])],
-                title="Camera RGB Image",
-                filename=os.path.join(output_dir, "cam_rgb", f"{count:04d}.jpg"),
-            )
+            # cam_images = scene["camera"].data.output["rgb"][..., :3]
+            # save_images_grid(
+            #     cam_images,
+            #     subtitles=[f"Cam{i}" for i in range(cam_images.shape[0])],
+            #     title="Camera RGB Image",
+            #     filename=os.path.join(output_dir, "cam_rgb", f"{count:04d}.jpg"),
+            # )
 
 
 def main():

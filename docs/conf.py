@@ -138,7 +138,7 @@ autodoc_mock_imports = [
     "pxr",
     "isaacsim",
     "omni",
-    "omni.kit",
+    "isaacsim",
     "omni.log",
     "omni.usd",
     "omni.client",

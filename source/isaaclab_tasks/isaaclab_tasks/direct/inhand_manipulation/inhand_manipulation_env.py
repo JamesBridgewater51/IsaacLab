@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# Copyright (c) 2022-2024, The Isaac Lab Project Developers.
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
@@ -9,25 +9,41 @@ from __future__ import annotations
 import numpy as np
 import torch
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, RigidObject
 from isaaclab.envs import DirectRLEnv
 from isaaclab.markers import VisualizationMarkers
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
-from isaaclab.utils.math import quat_conjugate, quat_from_angle_axis, quat_mul, sample_uniform, saturate
+from isaaclab.utils.math import quat_conjugate, quat_from_angle_axis, quat_mul, sample_uniform, saturate, random_orientation
 
-if TYPE_CHECKING:
-    from isaaclab_tasks.direct.allegro_hand.allegro_hand_env_cfg import AllegroHandEnvCfg
-    from isaaclab_tasks.direct.shadow_hand.shadow_hand_env_cfg import ShadowHandEnvCfg
+from isaaclab_tasks.direct.allegro_hand.allegro_hand_env_cfg import AllegroHandEnvCfg
+from isaaclab_tasks.direct.shadow_hand.shadow_hand_env_cfg import ShadowHandEnvCfg
 
+from termcolor import cprint
+import math
+
+# angles = range(0, 180, 30)
+# obj_rotations_x = [torch.tensor([math.cos(math.radians(angle / 2)), math.sin(math.radians(angle / 2)), 0, 0], dtype=torch.float32) for angle in angles]
+# obj_rotations_y = [torch.tensor([math.cos(math.radians(angle / 2)), 0, math.sin(math.radians(angle / 2)), 0], dtype=torch.float32) for angle in angles]
+# obj_rotations_z = [torch.tensor([math.cos(math.radians(angle / 2)), 0, 0, math.sin(math.radians(angle / 2))], dtype=torch.float32) for angle in angles]
+# obj_rotations_all = []
+# obj_rotations_all.extend(obj_rotations_x)
+# obj_rotations_all.extend(obj_rotations_y)
+# obj_rotations_all.extend(obj_rotations_z)
+# counter = 0
 
 class InHandManipulationEnv(DirectRLEnv):
     cfg: AllegroHandEnvCfg | ShadowHandEnvCfg
 
     def __init__(self, cfg: AllegroHandEnvCfg | ShadowHandEnvCfg, render_mode: str | None = None, **kwargs):
+        # cfg.viewer.eye = (0.0, -1.2, 0.5)
+        # cfg.viewer.lookat = (0.0, -0.45, 0.5)
+        # cfg.episode_length_s = 1.0
+        
         super().__init__(cfg, render_mode, **kwargs)
+        
+        cprint(f"cfg: {cfg}", "green")
 
         self.num_hand_dofs = self.hand.num_joints
 
@@ -38,9 +54,22 @@ class InHandManipulationEnv(DirectRLEnv):
 
         # list of actuated joints
         self.actuated_dof_indices = list()
+        self.dof_names_now = list()
         for joint_name in cfg.actuated_joint_names:
             self.actuated_dof_indices.append(self.hand.joint_names.index(joint_name))
+            # cprint(f"name: {joint_name}, idx: {self.hand.joint_names.index(joint_name)}", "green")
         self.actuated_dof_indices.sort()
+        cprint(f"self.joint_names: {self.hand.joint_names}", "yellow")
+        cprint(f"self.actuated_dof_indices: {self.actuated_dof_indices}", "yellow")
+        for idx in range(24):
+            self.dof_names_now.append(self.hand.joint_names[idx])
+        cprint(f"dof_names_now: {self.dof_names_now}", "yellow")
+
+        self.wrist_indices = list()
+        if self.cfg.fix_wrist == True:
+            for wrist_name in ["robot0_WRJ0", "robot0_WRJ1"]:  # # 0 控制上下， 1 控制左右
+                self.wrist_indices.append(self.hand.joint_names.index(wrist_name))
+            self.wrist_indices.sort()
 
         # finger bodies
         self.finger_bodies = list()
@@ -53,6 +82,8 @@ class InHandManipulationEnv(DirectRLEnv):
         joint_pos_limits = self.hand.root_physx_view.get_dof_limits().to(self.device)
         self.hand_dof_lower_limits = joint_pos_limits[..., 0]
         self.hand_dof_upper_limits = joint_pos_limits[..., 1]
+        cprint(f"self.hand_dof_lower_limits: {self.hand_dof_lower_limits}", "yellow")
+        cprint(f"self.hand_dof_upper_limits: {self.hand_dof_upper_limits}", "yellow")
 
         # track goal resets
         self.reset_goal_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -64,6 +95,9 @@ class InHandManipulationEnv(DirectRLEnv):
         self.goal_rot[:, 0] = 1.0
         self.goal_pos = torch.zeros((self.num_envs, 3), dtype=torch.float, device=self.device)
         self.goal_pos[:, :] = torch.tensor([-0.2, -0.45, 0.68], device=self.device)
+        # self.goal_pos[:, :] = torch.tensor([-0.2, -0.45, 0.58], device=self.device)
+        # self.goal_pos[:, :] = torch.tensor([0, -0.3, 0.5], device=self.device)
+        # self.goal_pos[:, :] = self.in_hand_pos
         # initialize goal marker
         self.goal_markers = VisualizationMarkers(self.cfg.goal_object_cfg)
 
@@ -76,6 +110,71 @@ class InHandManipulationEnv(DirectRLEnv):
         self.y_unit_tensor = torch.tensor([0, 1, 0], dtype=torch.float, device=self.device).repeat((self.num_envs, 1))
         self.z_unit_tensor = torch.tensor([0, 0, 1], dtype=torch.float, device=self.device).repeat((self.num_envs, 1))
 
+        # [-0.00347164 -0.38006547  0.5914129 ], obj_rot: [ 0.6866924  -0.45154375 -0.47601217  0.3130083 ]
+
+
+        # self.reset_object_pos = torch.tensor([[-0.0035, -0.3801,  0.5914]])
+        # [-0.0012, -0.3881,  0.6071],
+        # [ 0.0055, -0.3928,  0.5924],
+        # [ 0.0042, -0.3956,  0.5932],
+        # [-0.0041, -0.3854,  0.5982],
+        # [ 0.0023, -0.3926,  0.6072],
+        # [-0.0009, -0.3911,  0.5965],
+        # [-0.0037, -0.3867,  0.5948],
+        # [ 0.0048, -0.3902,  0.5963],
+        # [-0.0041, -0.3843,  0.6040],
+        # [-0.0052, -0.3840,  0.6032],
+        # [ 0.0034, -0.3841,  0.5904],
+        # [ 0.0066, -0.3822,  0.6073],
+        # [-0.0052, -0.3907,  0.6044],
+        # [-0.0071, -0.3906,  0.6071],
+        # [ 0.0044, -0.3848,  0.6075],
+        # [-0.0099, -0.3976,  0.6004],
+        # [ 0.0078, -0.3981,  0.5978],
+        # [ 0.0036, -0.3801,  0.5929],
+        # [ 0.0031, -0.3870,  0.5930]])
+
+        # i: 720, obj_pos: [ 0.00356718 -0.3800546   0.592868  ], obj_rot: [ 0.1635073  -0.24335988 -0.5331817   0.7935733 ]
+
+        self.reset_object_pos = torch.tensor([[ 0.00356718, -0.3800546,   0.592868  ],
+                                            #   [-0.0012, -0.3881,  0.6071],
+                                            #     [ 0.0055, -0.3928,  0.5924],
+                                            #     # [ 0.0042, -0.3956,  0.5932],
+                                            #     [-0.0041, -0.3854,  0.5982],
+                                              ])
+
+        # self.reset_object_rot = torch.tensor([[ 0.6867, -0.4515, -0.4760,  0.3130]])
+        # [ 0.0908, -0.1877,  0.4260, -0.8803],
+        # [ 0.8752, -0.1178,  0.4651, -0.0626],
+        # [ 0.0837,  0.9031,  0.0389,  0.4195],
+        # [ 0.7075,  0.1171,  0.6876,  0.1138],
+        # [ 0.1416, -0.3889,  0.3113, -0.8554],
+        # [ 0.5616, -0.8205, -0.0602,  0.0879],
+        # [ 0.2802,  0.4824,  0.4169,  0.7176],
+        # [ 0.7654, -0.2059,  0.5888, -0.1584],
+        # [ 0.4174, -0.2402,  0.7596, -0.4371],
+        # [ 0.4165,  0.8796,  0.0983,  0.2077],
+        # [ 0.0427,  0.0257,  0.8552,  0.5159],
+        # [ 0.0671,  0.3048,  0.2043,  0.9278],
+        # [ 0.7641,  0.5312,  0.3006,  0.2090],
+        # [ 0.1555,  0.1842, -0.6259, -0.7417],
+        # [ 0.8005,  0.3686,  0.4293,  0.1977],
+        # [ 0.1503,  0.3506, -0.3643, -0.8496],
+        # [ 0.0022, -0.0011,  0.8944, -0.4473],
+        # [ 0.1635, -0.2434, -0.5332,  0.7936],
+        # [ 0.0571, -0.0627, -0.6706,  0.7370]])
+
+        self.reset_object_rot = torch.tensor([[ 0.1635073,  -0.24335988, -0.5331817,   0.7935733 ],
+                                            #   [ 0.0908, -0.1877,  0.4260, -0.8803],
+                                            #     [ 0.8752, -0.1178,  0.4651, -0.0626],
+                                            #     # [ 0.0837,  0.9031,  0.0389,  0.4195],
+                                            #     [ 0.7075,  0.1171,  0.6876,  0.1138],
+                                                ])
+        self.reset_cnt = 0
+
+
+        # specific traj_number is not available
+
     def _setup_scene(self):
         # add hand, in-hand object, and goal object
         self.hand = Articulation(self.cfg.robot_cfg)
@@ -84,7 +183,7 @@ class InHandManipulationEnv(DirectRLEnv):
         spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
         # clone and replicate (no need to filter for this environment)
         self.scene.clone_environments(copy_from_source=False)
-        # add articulation to scene - we must register to scene to randomize with EventManager
+        # add articultion to scene - we must register to scene to randomize with EventManager
         self.scene.articulations["robot"] = self.hand
         self.scene.rigid_objects["object"] = self.object
         # add lights
@@ -93,6 +192,11 @@ class InHandManipulationEnv(DirectRLEnv):
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         self.actions = actions.clone()
+        if self.cfg.fix_wrist == True:
+            for idx in self.wrist_indices:
+                self.actions[:, idx] = 0.0
+        # cprint(f"self.cfg.fix_wrist: {self.cfg.fix_wrist}", "yellow")
+        # cprint(f"self.actions: {self.actions}", "yellow")
 
     def _apply_action(self) -> None:
         self.cur_targets[:, self.actuated_dof_indices] = scale(
@@ -100,21 +204,46 @@ class InHandManipulationEnv(DirectRLEnv):
             self.hand_dof_lower_limits[:, self.actuated_dof_indices],
             self.hand_dof_upper_limits[:, self.actuated_dof_indices],
         )
+        # cprint(f"self.prev_targets[:, self.actuated_dof_indices]: {self.prev_targets[:, self.actuated_dof_indices]}", "yellow")
+        # cprint(f"self.actions: {self.actions}", "yellow")
+        # cprint(f"primed_actions[:, self.actuated_dof_indices]: {self.cur_targets[:, self.actuated_dof_indices]}", "yellow")
         self.cur_targets[:, self.actuated_dof_indices] = (
             self.cfg.act_moving_average * self.cur_targets[:, self.actuated_dof_indices]
             + (1.0 - self.cfg.act_moving_average) * self.prev_targets[:, self.actuated_dof_indices]
         )
+        # cprint(f"self.cur_targets[:, self.actuated_dof_indices]: {self.cur_targets[:, self.actuated_dof_indices]}", "cyan")
         self.cur_targets[:, self.actuated_dof_indices] = saturate(
             self.cur_targets[:, self.actuated_dof_indices],
             self.hand_dof_lower_limits[:, self.actuated_dof_indices],
             self.hand_dof_upper_limits[:, self.actuated_dof_indices],
         )
-
+        # name_list = []
+        # for idx in self.actuated_dof_indices:
+        #     name_list.append(self.hand.joint_names[idx])
+        # cprint(f"actuated_dof_indices: {name_list}", "yellow")
+        # cprint(f"self.cur_targets[:, self.actuated_dof_indices]: {self.cur_targets[:, self.actuated_dof_indices]}", "green")
+        
+        # cprint(f"scaled actions: {scale(self.actions,self.hand_dof_lower_limits[:, self.actuated_dof_indices],self.hand_dof_upper_limits[:, self.actuated_dof_indices],)}", "cyan")
+        # 这一段的理解是这样子的：从那个self.target[..., indices] = actions可以看出来，我们的action的顺序是和actuated indice的顺序一样，而由于indices的顺序是sort过的，所以我们的action的对应的关节名字应该是"self.hand.joint_names[idx]" 对应的那一个名字，看的时候应该要这样看
+        # 另外图哥也讲了一个点就是，物体的外力是可以搬动它的，比如我本来想往里面走，但是如果此时有一个物体推我，我也有可能往外面去，所以就是这样
+        # actuated_dof_list = []
+        # for idx in self.actuated_dof_indices:
+        #     actuated_dof_list.append(self.hand.joint_names[idx])
+        # cprint(f"self.cfg.actuated_joint_names[self.actuated_dof_indices]: {actuated_dof_list}", "yellow")
+        # cprint(f"self.actuated_dof_indices: {self.actuated_dof_indices}", "yellow")
+        # cprint(f"self.hand_dof_lower_limits[:, self.actuated_dof_indices]: {self.hand_dof_lower_limits[:, self.actuated_dof_indices]}", "yellow")
+        # cprint(f"self.hand_dof_upper_limits[:, self.actuated_dof_indices]: {self.hand_dof_upper_limits[:, self.actuated_dof_indices]}", "yellow")  # 0.0~ 1.570
         self.prev_targets[:, self.actuated_dof_indices] = self.cur_targets[:, self.actuated_dof_indices]
+
+        # for debug
+        # self.cur_targets[:, self.actuated_dof_indices] = self.hand_dof_upper_limits[:, self.actuated_dof_indices]
+        # self.cur_targets[:, self.actuated_dof_indices] = self.hand_dof_upper_limits[:, self.actuated_dof_indices] * 0.5
+        # self.cur_targets[:, 17] = self.hand_dof_lower_limits[:, 17]
 
         self.hand.set_joint_position_target(
             self.cur_targets[:, self.actuated_dof_indices], joint_ids=self.actuated_dof_indices
         )
+        # cprint(f"self.cur_targets: {self.cur_targets}", "grey")
 
     def _get_observations(self) -> dict:
         if self.cfg.asymmetric_obs:
@@ -135,6 +264,33 @@ class InHandManipulationEnv(DirectRLEnv):
         observations = {"policy": obs}
         if self.cfg.asymmetric_obs:
             observations = {"policy": obs, "critic": states}
+        # obj_pos = states[..., 48:51].squeeze(0)
+        # obj_rot = states[..., 51:55].squeeze(0)
+        # cprint(f"obj_pos, obj_rot: {obj_pos}, {obj_rot}", 'magenta')
+        # cprint(f"self.goal_pos, self.goal_rot: {self.goal_pos}, {self.goal_rot}", 'yellow')
+
+        # obj_v = states[..., 55:58].squeeze(0)
+        # obj_v_rot = states[..., 58:62].squeeze(0)
+        # # 
+        # # obj_pos_pred = obs[..., 15:18]
+        # # Q = obs[..., 18:22]
+        # # goal_rot = torch.tensor([1., 0., 0., 0.], dtype=torch.float32).to(Q.device)
+
+        # # from isaaclab.utils.math import quat_conjugate, quat_from_angle_axis, quat_mul, sample_uniform, saturate
+        # # Q_pred = quat_mul(self.object_rot, quat_conjugate(self.goal_rot))
+
+
+        # if (torch.all(obj_v_rot == 0) and torch.all(obj_v == 0)):   # at the beginning frame
+        #     cprint(f"self.object_pos, self.object_rot: {self.object_pos}, {self.object_rot}", 'magenta')
+        # # cprint(f"obj_pos_pred: {obj_pos_pred}", 'magenta')
+        # # cprint(f"Q, Q_pred: {Q}, {Q_pred}", 'magenta')
+
+        # # assert(torch.all(Q == Q_pred))
+        # # assert(torch.all(obj_pos == self.object_pos))
+        # # assert(torch.all(obj_rot == self.object_rot))
+        #     cprint(f"*"*20, 'cyan')
+
+
         return observations
 
     def _get_rewards(self) -> torch.Tensor:
@@ -170,9 +326,16 @@ class InHandManipulationEnv(DirectRLEnv):
         self.extras["log"]["consecutive_successes"] = self.consecutive_successes.mean()
 
         # reset goals if the goal has been reached
-        goal_env_ids = self.reset_goal_buf.nonzero(as_tuple=False).squeeze(-1)
+        goal_env_ids = self.reset_goal_buf.nonzero(as_tuple=False).squeeze(-1) 
         if len(goal_env_ids) > 0:
+            # cprint(f"goal_env_ids: {goal_env_ids}", "light_yellow")
+            # rot_dist = rotation_distance(self.object_rot, self.goal_rot)
+            # cprint(f"rot_dist[idx]: {rot_dist[goal_env_ids]}", "cyan")
+            # cprint(f"self.object_rot: {self.object_rot}", "cyan")
             self._reset_target_pose(goal_env_ids)
+
+            if self.sim.has_rtx_sensors():
+                self.sim.render()
 
         return total_reward
 
@@ -198,7 +361,9 @@ class InHandManipulationEnv(DirectRLEnv):
             time_out = time_out | max_success_reached
         return out_of_reach, time_out
 
+    ''' reset_idx: reset the [env, the obj, the target_obj], reset_target_pose: only reset the target_obj. '''
     def _reset_idx(self, env_ids: Sequence[int] | None):
+        # cprint(f"[reset_idx] goal_env_ids: {env_ids}", "light_yellow")
         if env_ids is None:
             env_ids = self.hand._ALL_INDICES
         # resets articulation and rigid body attributes
@@ -209,8 +374,16 @@ class InHandManipulationEnv(DirectRLEnv):
 
         # reset object
         object_default_state = self.object.data.default_root_state.clone()[env_ids]
+        '''Default root state ``[pos, quat, lin_vel, ang_vel]`` in local environment frame '''
+
+
+        #################################### start of seperate line ###########################################
+
         pos_noise = sample_uniform(-1.0, 1.0, (len(env_ids), 3), device=self.device)
         # global object positions
+        '''
+        keep the xyz position relatively still, but add some noise to the it
+        '''
         object_default_state[:, 0:3] = (
             object_default_state[:, 0:3] + self.cfg.reset_position_noise * pos_noise + self.scene.env_origins[env_ids]
         )
@@ -220,37 +393,91 @@ class InHandManipulationEnv(DirectRLEnv):
             rot_noise[:, 0], rot_noise[:, 1], self.x_unit_tensor[env_ids], self.y_unit_tensor[env_ids]
         )
 
+        # if self.cfg.object_name in ["ring", "vase", "cup", "A", "pyramid", "apple"]:
+        if self.cfg.object_name in ["ring", "vase", "cup", "A", "apple", "stick", "smallvase"]:
+            object_default_state[:, 3:7] = randomize_rotation(
+            rot_noise[:, 0], rot_noise[:, 1], self.x_unit_tensor[env_ids], self.z_unit_tensor[env_ids]  # y-axis up
+        )
+
+        ######################################## seperate line, if want to control the resetting process then comment out the above lines
+
+        # from random import randint
+        # rand_idx_to_reset = randint(0, len(self.reset_object_pos)-1)
+        # # rand_idx_to_reset = self.reset_cnt % len(self.reset_object_pos)
+        # self.reset_cnt += 1
+
+        # object_default_state[:, 0:3] = self.reset_object_pos[rand_idx_to_reset].squeeze(0).repeat(len(env_ids), 1)
+        # object_default_state[:, 3:7] = self.reset_object_rot[rand_idx_to_reset].squeeze(0).repeat(len(env_ids), 1)
+
+        # from termcolor import cprint
+        # # cprint(f"resetting the index! ", "light_yellow")
+        # cprint(f"reset_pos: {object_default_state[:, 0:3]}, reset_rot: {object_default_state[:, 3:7]}", "light_yellow")
+
+
+        ####################################### end of seperate line ###########################################
+
         object_default_state[:, 7:] = torch.zeros_like(self.object.data.default_root_state[env_ids, 7:])
-        self.object.write_root_pose_to_sim(object_default_state[:, :7], env_ids)
-        self.object.write_root_velocity_to_sim(object_default_state[:, 7:], env_ids)
+        self.object.write_root_state_to_sim(object_default_state, env_ids)
 
         # reset hand
         delta_max = self.hand_dof_upper_limits[env_ids] - self.hand.data.default_joint_pos[env_ids]
         delta_min = self.hand_dof_lower_limits[env_ids] - self.hand.data.default_joint_pos[env_ids]
 
-        dof_pos_noise = sample_uniform(-1.0, 1.0, (len(env_ids), self.num_hand_dofs), device=self.device)
-        rand_delta = delta_min + (delta_max - delta_min) * 0.5 * dof_pos_noise
-        dof_pos = self.hand.data.default_joint_pos[env_ids] + self.cfg.reset_dof_pos_noise * rand_delta
+        # dof_pos_noise = sample_uniform(-1.0, 1.0, (len(env_ids), self.num_hand_dofs), device=self.device)
+        # rand_delta = delta_min + (delta_max - delta_min) * 0.5 * dof_pos_noise
+        # dof_pos = self.hand.data.default_joint_pos[env_ids] + self.cfg.reset_dof_pos_noise * rand_delta
 
-        dof_vel_noise = sample_uniform(-1.0, 1.0, (len(env_ids), self.num_hand_dofs), device=self.device)
-        dof_vel = self.hand.data.default_joint_vel[env_ids] + self.cfg.reset_dof_vel_noise * dof_vel_noise
+        # dof_vel_noise = sample_uniform(-1.0, 1.0, (len(env_ids), self.num_hand_dofs), device=self.device)
+        # dof_vel = self.hand.data.default_joint_vel[env_ids] + self.cfg.reset_dof_vel_noise * dof_vel_noise
+
+
+        # turn off the noise
+        # dof_pos_noise = sample_uniform(-1.0, 1.0, (len(env_ids), self.num_hand_dofs), device=self.device)
+        # rand_delta = delta_min + (delta_max - delta_min) * 0.5 * dof_pos_noise
+        dof_pos = self.hand.data.default_joint_pos[env_ids]
+
+        # dof_vel_noise = sample_uniform(-1.0, 1.0, (len(env_ids), self.num_hand_dofs), device=self.device)
+        dof_vel = self.hand.data.default_joint_vel[env_ids]
 
         self.prev_targets[env_ids] = dof_pos
         self.cur_targets[env_ids] = dof_pos
         self.hand_dof_targets[env_ids] = dof_pos
 
+        # cprint(f"dof_pos: {dof_pos}, dof_vel: {dof_vel}", "light_yellow")  #   all 0 if no noise
+
         self.hand.set_joint_position_target(dof_pos, env_ids=env_ids)
+
+        # cprint(f"dof_pos:{dof_pos}", "red")
         self.hand.write_joint_state_to_sim(dof_pos, dof_vel, env_ids=env_ids)
 
         self.successes[env_ids] = 0
         self._compute_intermediate_values()
 
+        
+
     def _reset_target_pose(self, env_ids):
+        # cprint(f"[reset_target_pose] goal_env_ids: {env_ids}", "light_yellow")
+        
         # reset goal rotation
         rand_floats = sample_uniform(-1.0, 1.0, (len(env_ids), 2), device=self.device)
         new_rot = randomize_rotation(
             rand_floats[:, 0], rand_floats[:, 1], self.x_unit_tensor[env_ids], self.y_unit_tensor[env_ids]
         )
+
+        # if self.cfg.object_name in ["ring", "vase", "cup", "A", "pyramid", "apple"]:
+        if self.cfg.object_name in ["ring", "vase", "cup", "A", "apple", "stick", "smallvase"]:
+            new_rot = randomize_rotation(
+            rand_floats[:, 0], rand_floats[:, 1], self.x_unit_tensor[env_ids], self.z_unit_tensor[env_ids]  # y-axis up
+        )
+        
+        # global counter
+        # new_rot = obj_rotations_all[counter % len(obj_rotations_all)].repeat(len(env_ids), 1).to(dtype=torch.float32, device=self.device)
+        # counter += 1
+        # cprint(f"new_rot: {new_rot}", "yellow")
+
+        # #  for testing
+        # new_rot = torch.zeros_like(new_rot)
+        # new_rot[:, 3] = 1.0
 
         # update goal pose and markers
         self.goal_rot[env_ids] = new_rot
@@ -266,6 +493,11 @@ class InHandManipulationEnv(DirectRLEnv):
         self.fingertip_pos -= self.scene.env_origins.repeat((1, self.num_fingertips)).reshape(
             self.num_envs, self.num_fingertips, 3
         )
+        # from termcolor import cprint
+        # cprint(f"[InhandManipulationEnv] computing intermediate values! ", "blue")
+        # cprint(f"self.hand.data.body_pos_w[:, self.finger_bodies]: {self.hand.data.body_pos_w[:, self.finger_bodies]}", "blue")
+        # cprint(f"self.scene.env_origins.repeat((1, self.num_fingertips)).reshape(self.num_envs, self.num_fingertips, 3): {self.scene.env_origins.repeat((1, self.num_fingertips)).reshape(self.num_envs, self.num_fingertips, 3)}", "blue")
+        # cprint(f"self.fingertip_pos: {self.fingertip_pos}", "blue")
         self.fingertip_velocities = self.hand.data.body_vel_w[:, self.finger_bodies]
 
         self.hand_dof_pos = self.hand.data.joint_pos
@@ -278,11 +510,25 @@ class InHandManipulationEnv(DirectRLEnv):
         self.object_linvel = self.object.data.root_lin_vel_w
         self.object_angvel = self.object.data.root_ang_vel_w
 
+        # cprint(f"self.joint_names: {self.hand.joint_names}", "red")
+        # cprint(f"hand_dof_pos[..., self.actuated_dof_indices]: {self.hand_dof_pos[..., self.actuated_dof_indices]}", "red")
+        # cprint(f"hand_dof_pos: {self.hand_dof_pos}", "red")
+        # # cprint(f"unscale_hand_dof_pos[..., self.actuated_dof_indices]: {unscale(self.hand_dof_pos, self.hand_dof_lower_limits, self.hand_dof_upper_limits)[..., self.actuated_dof_indices]}", "red")
+        # cprint(f"*"*50, "cyan")
+
     def compute_reduced_observations(self):
         # Per https://arxiv.org/pdf/1808.00177.pdf Table 2
         #   Fingertip positions
         #   Object Position, but not orientation
         #   Relative target orientation
+        # cprint(f"self.goal_rot: {self.goal_rot}", "magenta")
+        # cprint(f"quat_conjugate(self.goal_rot): {quat_conjugate(self.goal_rot)}", "magenta")
+        # cprint(f"self.max_episode_length: {self.max_episode_length}", "yellow")
+        # cprint(f"self.max_episode_length_s: {self.max_episode_length_s}", "yellow")
+        # cprint(f"self.fingertip_pos.view(self.num_envs, self.num_fingertips * 3).shape: {self.fingertip_pos.view(self.num_envs, self.num_fingertips * 3).shape}", "magenta")
+        # cprint(f"self.object_pos.shape: {self.object_pos.shape}", "magenta")
+        # cprint(f"quat_mul(self.object_rot, quat_conjugate(self.goal_rot)).shape: {quat_mul(self.object_rot, quat_conjugate(self.goal_rot)).shape}", "magenta")
+        # cprint(f"self.actions.shape: {self.actions}", "magenta")
         obs = torch.cat(
             (
                 self.fingertip_pos.view(self.num_envs, self.num_fingertips * 3),
@@ -292,10 +538,68 @@ class InHandManipulationEnv(DirectRLEnv):
             ),
             dim=-1,
         )
+        # cprint(f"agent_pos: {unscale(self.hand_dof_pos, self.hand_dof_lower_limits, self.hand_dof_upper_limits)}", "magenta")
+        # cprint(f"lower_limit: {self.hand_dof_lower_limits}", "green")
+        # cprint(f"upper_limit: {self.hand_dof_upper_limits}", "green")
+        # from termcolor import cprint
+        # # cprint(f"[InhandManipulationEnv] computing reduced observations! ", "blue")
+        # cprint(f"[InhandManipulationEnv] self.fingertip_pos.view(self.num_envs, self.num_fingertips * 3): {self.fingertip_pos.view(self.num_envs, self.num_fingertips * 3)}", "blue")
+
+
+        # cprint(f"obs.shape: {obs.shape}", "magenta")
+        # cprint(f"*"*50, "cyan")
+
+        # obj_rot = random_orientation(1, device='cpu')
+
+        # goal_rot = random_orientation(1, device='cpu')
+
+        # from termcolor import cprint
+
+        # a = quat_mul(obj_rot, quat_conjugate(goal_rot))
+
+        # cprint(f"obj_rot: {obj_rot}", "green")
+        # cprint(f"goal_rot: {goal_rot}", "green")
+        # cprint(f"a: {a}", "green")
+
+        # goal_rot_conj = quat_conjugate(goal_rot)
+        # obj_rot_pred = quat_mul(a, goal_rot_conj)
+        # cprint(f"obj_rot_pred: {obj_rot_pred}", "red")
+
+        # assert(torch.all(obj_rot_pred == obj_rot))
+
+        ''' 
+
+        self.goal_rot: tensor([[1., 0., 0., 0.]], device='cuda:0')
+        quat_conjugate(self.goal_rot): tensor([[1., 0., 0., 0.]], device='cuda:0')
+        self.max_episode_length: 2000
+        self.max_episode_length_s: 100.0
+        **************************************************
+
+
+        self.fingertip_pos.view(self.num_envs, self.num_fingertips * 3).shape: torch.Size([1, 15])
+        self.object_pos.shape: torch.Size([1, 3])
+        quat_mul(self.object_rot, quat_conjugate(self.goal_rot)).shape: torch.Size([1, 4])
+        self.actions.shape: torch.Size([1, 20])
+        obs.shape: torch.Size([1, 42])
+        '''
 
         return obs
 
     def compute_full_observations(self):
+        # add for debug: 
+        # from termcolor import cprint
+        # hand_data = torch.cat(
+        #     [unscale(self.hand_dof_pos, self.hand_dof_lower_limits, self.hand_dof_upper_limits),
+        #         self.cfg.vel_obs_scale * self.hand_dof_vel,], dim=-1)
+        # cprint(f"hand.shape: {hand_data.shape}", "magenta")
+        # hand_half = unscale(
+        #     self.hand_dof_pos, self.hand_dof_lower_limits, self.hand_dof_upper_limits
+        # )
+        # cprint(f"hand_half.shape: {hand_half.shape}", "magenta")
+        '''
+        hand.shape: torch.Size([1, 48])
+        hand_half.shape: torch.Size([1, 24])
+        '''
         obs = torch.cat(
             (
                 # hand
@@ -319,6 +623,8 @@ class InHandManipulationEnv(DirectRLEnv):
             ),
             dim=-1,
         )
+        
+
         return obs
 
     def compute_full_state(self):
@@ -347,12 +653,47 @@ class InHandManipulationEnv(DirectRLEnv):
             ),
             dim=-1,
         )
+
+        # from termcolor import cprint
+        # cprint(f"states.shape: {states.shape}", "magenta")
+        # cprint(f"unscale(self.hand_dof_pos, self.hand_dof_lower_limits, self.hand_dof_upper_limits).shape: {unscale(self.hand_dof_pos, self.hand_dof_lower_limits, self.hand_dof_upper_limits).shape}", "magenta")
+        # cprint(f"self.cfg.vel_obs_scale * self.hand_dof_vel.shape: {(self.cfg.vel_obs_scale * self.hand_dof_vel).shape}", "magenta")
+        # cprint(f"self.object_pos.shape: {self.object_pos.shape}", "magenta")
+        # cprint(f"self.object_rot.shape: {self.object_rot.shape}", "magenta")
+        # cprint(f"self.object_linvel.shape: {self.object_linvel}", "magenta")
+        # cprint(f"self.cfg.vel_obs_scale * self.object_angvel.shape: {(self.cfg.vel_obs_scale * self.object_angvel)}", "magenta")
+
+        # # goal
+        # cprint(f"self.in_hand_pos.shape: {self.in_hand_pos.shape}", "magenta")
+        # cprint(f"self.goal_rot.shape: {self.goal_rot.shape}", "magenta")
+        # cprint(f"quat_mul(self.object_rot, quat_conjugate(self.goal_rot)).shape: {quat_mul(self.object_rot, quat_conjugate(self.goal_rot)).shape}", "magenta")
+
+        # cprint(f"*"*20, "cyan")
+
+        '''
+        states.shape: torch.Size([1, 187])
+        unscale(self.hand_dof_pos, self.hand_dof_lower_limits, self.hand_dof_upper_limits).shape: torch.Size([1, 24])
+        self.cfg.vel_obs_scale * self.hand_dof_vel.shape: torch.Size([1, 24])
+        self.object_pos.shape: torch.Size([1, 3])
+        self.object_rot.shape: torch.Size([1, 4])
+        self.object_linvel.shape: torch.Size([1, 3])
+        self.cfg.vel_obs_scale * self.object_angvel.shape: torch.Size([1, 3])
+        self.in_hand_pos.shape: torch.Size([1, 3])
+        self.goal_rot.shape: torch.Size([1, 4])
+        quat_mul(self.object_rot, quat_conjugate(self.goal_rot)).shape: torch.Size([1, 4])
+        '''
+
+
+
         return states
 
 
 @torch.jit.script
 def scale(x, lower, upper):
     return 0.5 * (x + 1.0) * (upper - lower) + lower
+# 0.5x(upper - lower) + 0.5(upper + lower)
+
+# (x + 1) * (upper - lower) + 2 * lower = x * (upper - lower) + upper + lower
 
 
 @torch.jit.script

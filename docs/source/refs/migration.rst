@@ -105,7 +105,7 @@ Isaac Lab extensions have been renamed to:
 
 * ``omni.isaac.lab`` --> ``isaaclab``
 * ``omni.isaac.lab_assets`` --> ``isaaclab_assets``
-* ``omni.isaac.lab_tasks`` --> ``isaaclab_tasks``
+* ``isaaclab_tasks`` --> ``isaaclab_tasks``
 
 In addition, we have split up the previous ``source/standalone/workflows`` directory into ``scripts/imitation_learning``
 and ``scripts/reinforcement_learning`` directories. The RSL RL, Stable-Baselines, RL_Games, SKRL, and Ray directories
