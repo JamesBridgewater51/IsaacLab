@@ -1402,6 +1402,7 @@ class Articulation(AssetBase):
 
         # perform some sanity checks to ensure actuators are prepared correctly
         total_act_joints = sum(actuator.num_joints for actuator in self.actuators.values())
+        # print(f"Fixed tendon names: {self.fixed_tendon_names}, body_names: {self.body_names}, joint_names: {self.joint_names}")
         if total_act_joints != (self.num_joints - self.num_fixed_tendons):
             omni.log.warn(
                 "Not all actuators are configured! Total number of actuated joints not equal to number of"

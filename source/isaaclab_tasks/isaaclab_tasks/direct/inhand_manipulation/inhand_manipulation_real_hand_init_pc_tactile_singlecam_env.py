@@ -17,6 +17,7 @@ from isaaclab.sensors.camera.utils import create_pointcloud_from_rgbd
 from isaaclab.utils.math import quat_conjugate, quat_from_angle_axis, quat_mul, sample_uniform, saturate, matrix_from_quat
 import open3d as o3d
 import numpy as np
+import dataclasses
 from collections.abc import Sequence
 from typing import Any, ClassVar
 
@@ -39,80 +40,43 @@ import copy
 
 
 def transform_points_inverse(
-    points: torch.Tensor, pos: torch.Tensor | None = None, quat: torch.Tensor | None = None
+    points: torch.Tensor, pos: torch.Tensor, quat: torch.Tensor
 ) -> torch.Tensor:
-    r"""Transform input points in a given frame to a target frame, the inverse of :func:`transform_points`.
+    r"""Transforms a batch of points from a world frame to a local frame.
 
-    This function transform points from a source frame to a target frame. The transformation is defined by the
-    position :math:`t` and orientation :math:`R` of the target frame in the source frame.
-
-    .. math::
-        p_{target} = R_{target} \times p_{source} + t_{target}
-
-    If the input `points` is a batch of points, the inputs `pos` and `quat` must be either a batch of
-    positions and quaternions or a single position and quaternion. If the inputs `pos` and `quat` are
-    a single position and quaternion, the same transformation is applied to all points in the batch.
-
-    If either the inputs :attr:`pos` and :attr:`quat` are None, the corresponding transformation is not applied.
+    This function applies a single transformation (per batch item) to a
+    set of P points. The correct inverse formula is: p_local = R.T @ (p_world - t)
 
     Args:
-        points: Points to transform. Shape is (N, P, 3) or (P, 3).
-        pos: Position of the target frame. Shape is (N, 3) or (3,).
-            Defaults to None, in which case the position is assumed to be zero.
-        quat: Quaternion orientation of the target frame in (w, x, y, z). Shape is (N, 4) or (4,).
-            Defaults to None, in which case the orientation is assumed to be identity.
+        points: Points in the world frame. Shape must be (N, P, 3).
+        pos: Position (t) of the local frame. Shape must be (N, 3).
+        quat: Quaternion orientation (R) of the local frame in (w, x, y, z).
+              Shape must be (N, 4).
 
     Returns:
-        Transformed points in the target frame. Shape is (N, P, 3) or (P, 3).
-
-    Raises:
-        ValueError: If the inputs `points` is not of shape (N, P, 3) or (P, 3).
-        ValueError: If the inputs `pos` is not of shape (N, 3) or (3,).
-        ValueError: If the inputs `quat` is not of shape (N, 4) or (4,).
+        Transformed points in the local frame. Shape is (N, P, 3).
     """
-    points_batch = points.clone()
-    # check if inputs are batched
-    is_batched = points_batch.dim() == 3
-    # -- check inputs
-    if points_batch.dim() == 2:
-        points_batch = points_batch[None]  # (P, 3) -> (1, P, 3)
-    if points_batch.dim() != 3:
-        raise ValueError(f"Expected points to have dim = 2 or dim = 3: got shape {points.shape}")
-    if not (pos is None or pos.dim() == 1 or pos.dim() == 2):
-        raise ValueError(f"Expected pos to have dim = 1 or dim = 2: got shape {pos.shape}")
-    if not (quat is None or quat.dim() == 1 or quat.dim() == 2):
-        raise ValueError(f"Expected quat to have dim = 1 or dim = 2: got shape {quat.shape}")
-    # -- rotation
-    if quat is not None:
-        # convert to batched rotation matrix
-        rot_mat = matrix_from_quat(quat)
-        if rot_mat.dim() == 2:
-            rot_mat_inversed = torch.inverse(rot_mat).float()
-            rot_mat_inversed = rot_mat_inversed[None]  # (3, 3) -> (1, 3, 3)
-        else:
-            rot_mat_inversed = torch.inverse(rot_mat.squeeze(0)).float()
-            rot_mat_inversed = rot_mat_inversed[None]  # (3, 3) -> (1, 3, 3)
-        # if rot_mat.dim() == 2:
-        #     rot_mat = rot_mat[None]  # (3, 3) -> (1, 3, 3)
-        # convert points to matching batch size (N, P, 3) -> (N, 3, P)
-        # and apply rotation
-        points_batch = torch.matmul(rot_mat_inversed, points_batch.transpose_(1, 2))
-        # (N, 3, P) -> (N, P, 3)
-        points_batch = points_batch.transpose_(1, 2)
-    # -- translation
-    if pos is not None:
-        # convert to batched translation vector
-        if pos.dim() == 1:
-            pos = pos[None, None, :]  # (3,) -> (1, 1, 3)
-        else:
-            pos = pos[:, None, :]  # (N, 3) -> (N, 1, 3)
-        # apply translation
-        points_batch += pos
-    # -- return points in same shape as input
-    if not is_batched:
-        points_batch = points_batch.squeeze(0)  # (1, P, 3) -> (P, 3)
+    # 1. Prepare for broadcasting by adding a dimension to pos.
+    # pos shape: (N, 3) -> (N, 1, 3)
+    # This allows subtracting it from points of shape (N, P, 3).
+    translated_points = points - pos.unsqueeze(1)
 
-    return points_batch
+    # 2. Convert quaternions to rotation matrices.
+    # quat shape: (N, 4) -> rot_mat shape: (N, 3, 3)
+    rot_mat = matrix_from_quat(quat)
+
+    # 3. Get the inverse rotation by transposing the matrices.
+    # rot_mat_inv shape: (N, 3, 3)
+    rot_mat_inv = rot_mat.transpose(-2, -1)
+
+    # 4. Apply the inverse rotation.
+    # PyTorch's matmul broadcasts the (N, 3, 3) matrix to each of the P points.
+    # Shapes: (N, 3, 3) @ (N, 3, P) -> (N, 3, P)
+    # We transpose points to (N, 3, P) for multiplication and then transpose back.
+    transformed_points = torch.matmul(rot_mat_inv, translated_points.transpose(-2, -1))
+    
+    return transformed_points.transpose(-2, -1)
+
 
 
 
@@ -139,7 +103,7 @@ def get_pc_and_color(obs, env_id, camera_numbers, use_camera_view=False, add_noi
             quat_w_ros[..., 0] = 1.0
 
         if add_noise:
-            quat_w_ros[:] = quat_mul(quat_w_ros[:], camera_rot_noise_now)
+            quat_w_ros[:] = quat_mul(quat_w_ros[:], camera_rot_noise_now[env_id])
             # cprint(f"quat_w_ros: {quat_w_ros}", "red")
 
 
@@ -207,7 +171,7 @@ class InHandManipulationRealHandInitPCTactileSingleCamEnv(InHandManipulationReal
             focal_length=18.145, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(1e-4, 1e4)
         ),
         # offset=CameraCfg.OffsetCfg(pos=(0.41655, 0.38761, 1.21457 + cfg.height_vis_obj), rot=(0.294, 0.126, 0.381, 0.867), convention="opengl"),
-        offset=CameraCfg.OffsetCfg(pos=(0.31, -0.08, 0.825 + cfg.height_vis_obj), rot=(0.2242, 0.1208, 0.2949, 0.9210), convention="opengl"),
+        offset=CameraCfg.OffsetCfg(pos=(0.31, -0.08, 0.825 + 50), rot=(0.2242, 0.1208, 0.2949, 0.9210), convention="opengl"),
 
         )
 
@@ -259,18 +223,20 @@ class InHandManipulationRealHandInitPCTactileSingleCamEnv(InHandManipulationReal
         self.tmp_pc = o3d.geometry.PointCloud()
         self.tmp_pc.points = o3d.utility.Vector3dVector(self.target_pc[..., :3].detach().cpu().numpy())
         self.tmp_pc.colors = o3d.utility.Vector3dVector(self.target_pc[..., 3:].detach().cpu().numpy() * 255)
-        # farthest point sampling
         self.tmp_pc = o3d.geometry.PointCloud.farthest_point_down_sample(self.tmp_pc, self.target_pc_crop_max)
-        # take out the points and form the target_pc
+        # N x 6
         self.target_pc = torch.tensor(np.concatenate([np.asarray(self.tmp_pc.points), np.asarray(self.tmp_pc.colors)], axis=-1)).to(device=self.device)
-        cprint(f"self.target_pc[..., 3:] range: {torch.min(self.target_pc[..., 3:], dim=0).values}, {torch.max(self.target_pc[..., 3:], dim=0).values}", "cyan")
-        self.cur_target_pc = torch.zeros_like(self.target_pc)
+        self.cur_target_pc = self.target_pc[None, ...].repeat(self.num_envs, 1, 1)  # (num_envs, num_pts, 6)
 
         if self.cfg.point_cloud_noise_model is not None:
-            self._pc_noise_model: NoiseModel = self.cfg.point_cloud_noise_model.class_type(
-                self.cfg.point_cloud_noise_model, num_envs=self.num_envs, device=self.device
-            )
-        
+            self._pc_noise_models = []
+            # PERFORMANCE: To adapt to _get_observations API's env-wise loop, pc_noise_model is created env-wise. This raise performance concerns.
+            for i in range(self.num_envs):
+                pc_noise_model_cfg = dataclasses.replace(self.cfg.point_cloud_noise_model)
+                self._pc_noise_model: NoiseModel = pc_noise_model_cfg.class_type(
+                    pc_noise_model_cfg, num_envs=1, device=self.device
+                )
+                self._pc_noise_models.append(self._pc_noise_model)
 
         self.camera_quat = self.scene[f"camera_00"].data.quat_w_ros
         cprint(f"camera_quat: {self.camera_quat}", "cyan")
@@ -279,35 +245,11 @@ class InHandManipulationRealHandInitPCTactileSingleCamEnv(InHandManipulationReal
         self.camera_pos_noise_now = None
         self.x_and_y_noise_limit = 0.002
         self.z_noise_limit = 0.005
-        # cprint(f"self.cfg: {self.cfg}", "cyan")
-        # self.sim.render()
-        
-        # self.camera_rot = torch.tensor([0.294, 0.126, 0.381, 0.867], device=self.device)
 
-        real_pc_path = "/home/yijin/cfm_isaac/3D-Conditional-Flow-Matching/real_robot_data/1.ply"
-        self.real_pc = o3d.io.read_point_cloud(real_pc_path)
-
-        self.real_pc_adjusted = o3d.io.read_point_cloud(real_pc_path)
-        # self.real_pc_adjusted.points = o3d.utility.Vector3dVector(np.asarray(self.real_pc_adjusted.points) + np.array([0.0, -0.16, 0.0]))
-        self.points_to_save_path = "/home/yijin/cfm_isaac/3D-Conditional-Flow-Matching/real_robot_data/sim.ply"
-        self.points_to_save_path_full = "/home/yijin/cfm_isaac/3D-Conditional-Flow-Matching/real_robot_data/sim_full.ply"
-        self.points_to_save_path_transformed = "/home/yijin/cfm_isaac/3D-Conditional-Flow-Matching/real_robot_data/sim_transformed.ply"
-
-        transformation_matrix = np.array([[0.99192979, -0.09879483, -0.07946611, 0.02884686],[0.05093573, 0.88447267, -0.46380346, -0.13488187],[0.11610699, 0.45601281, 0.88236698, -0.06794662],[0.0, 0.0, 0.0, 1.0]])
-
-        self.real_pc_adjusted.transform(transformation_matrix)
-
-        
-        
-        
-        
-        
-    
-
-    # We don't want to modify the original "reset_target_pose" function
     def _reset_target_pose(self, env_ids):
-        
-        # reset goal rotation
+        """
+        reset goal rot.
+        """
         rand_floats = sample_uniform(-1.0, 1.0, (len(env_ids), 2), device=self.device)
 
         ############ code to control the target pose ############
@@ -328,56 +270,27 @@ class InHandManipulationRealHandInitPCTactileSingleCamEnv(InHandManipulationReal
             quat_y = quat_from_angle_axis(angle_y, self.y_unit_tensor[env_ids])
             new_rot = quat_mul(quat_x, quat_y).repeat(len(env_ids), 1)
 
-        # new_rot = self.goal_rot_arr.repeat(len(env_ids), 1)
-
         # update goal pose and markers
         self.goal_rot[env_ids] = new_rot
         goal_pos = self.goal_pos + self.scene.env_origins
         self.goal_markers.visualize(goal_pos, self.goal_rot)
-        # cprint(f"[InhandManiHandPCEnv]goal_pos: {goal_pos}, goal_rot: {self.goal_rot}", "light_yellow")
 
-        # Add: reset the vis_goal_obj's pos and rot
         vis_goal_pos = copy.deepcopy(goal_pos)
-        vis_goal_pos[..., 2] += self.cfg.height_vis_obj
+        vis_goal_pos[..., 2] += 50
         vis_root_state = torch.cat([vis_goal_pos, self.goal_rot], dim=-1)
         self.vis_goal_object.write_root_pose_to_sim(root_pose=vis_root_state, env_ids=env_ids)
 
         self.reset_goal_buf[env_ids] = 0
 
-        
-
-        # apply the goal_rot(quaternion) to the object
+        # 1. First transform target_pc from object canonicalized pose to world pose.
         rotation_matrix = matrix_from_quat(self.goal_rot[env_ids].squeeze(0)).to(dtype=self.target_pc.dtype, device=self.device)
-        self.cur_target_pc[..., :3] = torch.matmul(self.target_pc[..., :3], rotation_matrix.T)
-
-        # apply camera_rot to cur_target_pc
-        # rotation_matrix_camera = matrix_from_quat(self.camera_rot).to(dtype=self.target_pc.dtype, device=self.device)
-        # inverse_rotation_matrix_camera = torch.inverse(rotation_matrix_camera)
-        # self.cur_target_pc[..., :3] = torch.matmul(self.cur_target_pc[..., :3], inverse_rotation_matrix_camera.T)
-
-        # apply camera_rot to cur_target_pc
-
+        # NOTE: rotation_matrix is T_cb s.t P_b = T_bc * P_c, so P_c right multipllied by T_bc returns P_b.
+        self.cur_target_pc[..., :3] = torch.matmul(self.target_pc[None, ..., :3], rotation_matrix.permute(0, 2, 1)) # (1,num_pts,3) @ (num_envs, 3, 3) -> (num_envs, num_pts, 3)
         
-        self.cur_target_pc[..., 3:] = self.target_pc[..., 3:]
-        
+        # 2. Then transform the target_pc from world pose to camera pose.
         camera_pos = torch.zeros_like(self.camera_pos)
-        self.cur_target_pc[..., :3] = transform_points_inverse(self.cur_target_pc[..., :3].unsqueeze(0).float(), pos=camera_pos, quat=self.camera_quat).squeeze(0)
-
-        # just for debug, remember to remove it
-        # comment out these to let cur_pc to sit on the origin
-        # self.cur_target_pc[..., 0] += self.goal_pos[0, 0]
-        # self.cur_target_pc[..., 1] += self.goal_pos[0, 1]
-        # self.cur_target_pc[..., 2] += self.goal_pos[0, 2]
-
-        # show the target pc
-        # global pc_vis_debug
-        # cprint(f"self.cur_target_pc[..., :3].shape: {self.cur_target_pc[..., :3].shape}", "cyan")
-        # cprint(f"self.cur_target_pc[..., 3:].shape: {self.cur_target_pc[..., 3:].shape}", "cyan")
-        # cprint(f"self.cur_target_pc[..., 3:] range: {torch.min(self.cur_target_pc[..., 3:], dim=0).values}, {torch.max(self.cur_target_pc[..., 3:], dim=0).values}", "red")
-        # pc_vis_debug.points = o3d.utility.Vector3dVector(self.cur_target_pc[..., :3].detach().cpu().numpy())
-        # pc_vis_debug.colors = o3d.utility.Vector3dVector(self.cur_target_pc[..., 3:].detach().cpu().numpy())
-        # o3d.visualization.draw_geometries([pc_vis_debug])
-
+        # NOTE: camera pose is R_cb , so use transform_points_inverse.
+        self.cur_target_pc[..., :3] = transform_points_inverse(self.cur_target_pc[..., :3].float(), pos=camera_pos, quat=self.camera_quat).squeeze(0)
 
 
 
@@ -385,24 +298,16 @@ class InHandManipulationRealHandInitPCTactileSingleCamEnv(InHandManipulationReal
     # modify the "set_up_scene" function to add cameras and delete ground plane
     def _setup_scene(self):
         # add hand, in-hand object, and goal object
+        self.scene.clone_environments(copy_from_source=False)
         self.hand = Articulation(self.cfg.robot_cfg)
         self.object = RigidObject(self.cfg.object_cfg)
 
-        self.vis_goal_object = RigidObject(self.cfg.vis_goal_obj_cfg)
-        self.camera_00 = Camera(self.camera_config_00)
-        self.camera_sky = Camera(self.sky_camera_cfg)
+        self.vis_goal_object = RigidObject(dataclasses.replace(self.cfg.object_cfg))
+        self.camera_00 = TiledCamera(self.camera_config_00)
+        self.camera_sky = TiledCamera(self.sky_camera_cfg)
 
         self.contact_forces = ContactSensor(self.cfg.contact_forces_cfg)
 
-        # cprint(f"self.contact_forces: {self.contact_forces}", "cyan")
-
-        # we don't need the ground plane
-        # add ground for debug convenience now
-        # spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
-        # clone and replicate (no need to filter for this environment)
-        self.scene.clone_environments(copy_from_source=False)
-
-        # add articultion to scene - we must register to scene to randomize with EventManager
         self.scene.articulations["robot"] = self.hand
         self.scene.rigid_objects["object"] = self.object
         self.scene.sensors["camera_00"] = self.camera_00
@@ -449,13 +354,10 @@ class InHandManipulationRealHandInitPCTactileSingleCamEnv(InHandManipulationReal
             self.extras["log"] = dict()
         self.extras["log"]["consecutive_successes"] = self.consecutive_successes.mean()
 
-        # reset goals if the goal has been reached
         goal_env_ids = self.reset_goal_buf.nonzero(as_tuple=False).squeeze(-1)
         if len(goal_env_ids) > 0:
-            # one_line_difference
-            # cprint(f"[inhand_mani_single_cam]goal_env_ids: {goal_env_ids}", "cyan")
-            cprint(f"success!!!!")
-            self._reset_idx(goal_env_ids)   # reset the object to the initial state and randomize the goal pose
+            # NOTE; original code: self._reset_target_pose(goal_env_ids), current: self._reset_idx(goal_env_ids)
+            self._reset_idx(goal_env_ids)   
             if self.sim.has_rtx_sensors():
                 self.sim.render()
 
@@ -470,45 +372,8 @@ class InHandManipulationRealHandInitPCTactileSingleCamEnv(InHandManipulationReal
 
     def _get_observations(self) -> dict:
 
-        # print(f"self.sim.has_gui(): {self.sim.has_gui()}, self.sim.has_rtx_sensors(): {self.sim.has_rtx_sensors()}")
-
-        is_rendering = self.sim.has_gui() or self.sim.has_rtx_sensors()
-        # make sure the synchronization between the physics and the rendering
-        if is_rendering:
-            # for i in range(5):
-            for i in range(3):
-                # cprint(f"rendering...", "cyan")
-                self.sim.render()
         obs_origin = super()._get_observations()
 
-
-        # cprint(f"obs_origin.keys(): {obs_origin.keys()}", "cyan")  # 'policy' 'critic'
-
-        # obs = obs_origin['policy']
-
-        # states = obs_origin['critic']
-        # # cprint(f"state.shape: {states.shape}", "cyan")
-
-        # obj_pos = states[..., 48:51].squeeze(0)
-        # obj_rot = states[..., 51:55].squeeze(0)
-
-        # obj_pos_pred = obs[..., 15:18]
-        # Q = obs[..., 18:22]
-        # goal_rot = self.goal_rot.squeeze(0)
-
-        # Q_pred = quat_mul(obj_rot, quat_conjugate(goal_rot))
-
-        # cprint(f"obj_pos: {obj_pos}, obj_rot: {obj_rot}", "magenta")
-        # cprint(f"obj_pos_pred: {obj_pos_pred}, Q: {Q}, Q_pred: {Q_pred}", "magenta")
-
-        # # check actions
-        # action_obs = obs[..., -20:].squeeze(0)
-        # action_state = states[..., -20:].squeeze(0)
-        # cprint(f"action_obs: {action_obs}", "cyan")
-        # cprint(f"action_state: {action_state}", "cyan")
-
-        # scene.update() function will update everything inside the scene,  so we don't need to worry about this
-        
         for cam_id in range(self.num_cameras):
         # get rgba, depth, intrinsic_matrices, pos_w, quat_w_ros from camera sensor
 
@@ -524,8 +389,6 @@ class InHandManipulationRealHandInitPCTactileSingleCamEnv(InHandManipulationReal
             obs_sky[f"intrinsic_matrices_0{cam_id}"] = self.scene[f"camera_sky"].data.intrinsic_matrices
             obs_sky[f"pos_w_0{cam_id}"] = self.scene[f"camera_sky"].data.pos_w
             obs_sky[f"quat_w_ros_0{cam_id}"] = self.scene[f"camera_sky"].data.quat_w_ros
-
-        
 
         # add point_cloud here, will be used in the Imitation learning part. 
         use_camera_view = True
@@ -552,99 +415,46 @@ class InHandManipulationRealHandInitPCTactileSingleCamEnv(InHandManipulationReal
                 colors_true_all = colors_true_all[points_dist_true_all > cut_dis]
                 points_true_all[..., 2] -= cut_dis
 
-            # points_all_x = points_all[..., 0]
-            # points_all_y = points_all[..., 1]
-            '''
-            points_all_y range: -0.12416546046733856, 0.09531870484352112
-            points_all_z range: 0.9682724475860596, 1.151523232460022
-            points_all_x range: -0.06341685354709625, 0.20416565239429474
-            '''
-                  # 把这个出生玩意拉回来到原点,在真机上面也这样弄,这样只要看起来差不多应该问题就不大
-            # cprint(f"points_all_x range: {torch.min(points_all_x, dim=0).values}, {torch.max(points_all_x, dim=0).values}", "cyan")
-            # cprint(f"points_all_y range: {torch.min(points_all_y, dim=0).values}, {torch.max(points_all_y, dim=0).values}", "cyan")
-            # cprint(f"points_all_z range: {torch.min(points_all_z, dim=0).values}, {torch.max(points_all_z, dim=0).values}", "cyan")
-
             # add gaussion noise
-            if self._pc_noise_model is not None:
-                points_all = self._pc_noise_model.apply(points_all)
-                points_true_all = self._pc_noise_model.apply(points_true_all)
+            if self._pc_noise_models is not None:
+                points_all = self._pc_noise_models[env_id](points_all)
+                points_true_all = self._pc_noise_models[env_id](points_true_all)
             
             points_true_env = o3d.geometry.PointCloud()
             points_true_env.points = o3d.utility.Vector3dVector(points_true_all.detach().cpu().numpy())
             points_true_env.colors = o3d.utility.Vector3dVector(colors_true_all.detach().cpu().numpy())
-            # farthest point sampling
             points_true_env = o3d.geometry.PointCloud.farthest_point_down_sample(points_true_env, self.camera_crop_max)
-            # combine points and colors
             combined_points_colors_true = np.concatenate([np.asarray(points_true_env.points), np.asarray(points_true_env.colors)], axis=-1)
-            # points_colors_all = torch.cat([torch.tensor(points_env.points), torch.tensor(points_env.colors)], dim=1)
             point_cloud_true_list.append(torch.tensor(combined_points_colors_true))
 
-            # cut the fovs
-            # points_all = points_all[points_all[..., 0] < 0.3]
-            # colors_all = colors_all[points_all[..., 0] < 0.3]
+    
             points_env = o3d.geometry.PointCloud()
             points_env.points = o3d.utility.Vector3dVector(points_all.detach().cpu().numpy())
             points_env.colors = o3d.utility.Vector3dVector(colors_all.detach().cpu().numpy())
-            # points_env.colors = o3d.utility.Vector3dVector(np.asarray(points_env.colors) / 255)
-            # o3d.io.write_point_cloud(self.points_to_save_path_full, points_env)
-            # points_env.colors = o3d.utility.Vector3dVector(np.asarray(points_env.colors) * 255)
-            # farthest point sampling
+    
             points_env = o3d.geometry.PointCloud.farthest_point_down_sample(points_env, self.camera_crop_max)
-            # combine points and colors
             combined_points_colors = np.concatenate([np.asarray(points_env.points), np.asarray(points_env.colors)], axis=-1)
-            # points_colors_all = torch.cat([torch.tensor(points_env.points), torch.tensor(points_env.colors)], dim=1)
             point_cloud_list.append(torch.tensor(combined_points_colors))
-            # cprint(f"pc.shape: {torch.tensor(combined_points_colors).shape}", "cyan")
-
-            # show the cooridnates
-            # cord = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1, origin=[0, 0, 0])
-            # points_env.colors = o3d.utility.Vector3dVector(np.asarray(points_env.colors) / 255)
-            
-            # o3d.visualization.draw_geometries([points_env, cord, self.real_pc, self.real_pc_adjusted])
-            # o3d.visualization.draw_geometries([points_env, cord])
-            # # save points_env to the file
-            # o3d.io.write_point_cloud(self.points_to_save_path, points_env)
-
-            # get the sky pc
             point_sky_list = []
             points_all_sky, colors_all_sky = get_pc_and_color(obs_sky, env_id, self.num_cameras, use_camera_view, add_noise, self.camera_rot_noise_now, self.camera_pos_noise_now)
             if not use_camera_view:   # if not , we need alignment
                 points_all_sky[..., 2] -= self.cfg.height_vis_obj
-                # pass
             
             if use_camera_view:
                 points_all_sky[..., 2] -= cut_dis
 
             if self._pc_noise_model is not None:
-                points_all_sky = self._pc_noise_model.apply(points_all_sky)
+                points_all_sky = self._pc_noise_models[env_id](points_all_sky)
             points_all_sky_all = torch.cat([points_all, points_all_sky], dim=0)
             colors_all_sky_all = torch.cat([colors_all, colors_all_sky], dim=0)
             points_env_sky = o3d.geometry.PointCloud()
             points_env_sky.points = o3d.utility.Vector3dVector(points_all_sky_all.detach().cpu().numpy())
             points_env_sky.colors = o3d.utility.Vector3dVector(colors_all_sky_all.detach().cpu().numpy())
-            # farthest point sampling
             points_env_sky = o3d.geometry.PointCloud.farthest_point_down_sample(points_env_sky, self.camera_crop_max)
-            # combine points and colors 
             combined_points_colors_sky = np.concatenate([np.asarray(points_env_sky.points), np.asarray(points_env_sky.colors)], axis=-1)
             point_sky_list.append(torch.tensor(combined_points_colors_sky))
 
 
-            ################################    debug area begins  ##################################
-
-            # points_env_sky.colors = o3d.utility.Vector3dVector(np.asarray(points_env_sky.colors) / 255)
-            # o3d.visualization.draw_geometries([points_env_sky])
-            
-            # cprint(f"torch.cat([torch.tensor(combined_points_colors, device=self.device)[..., :3], device=self.device)[..., :3], self.cur_target_pc[..., :3]], dim=0).shape: {torch.cat([torch.tensor(combined_points_colors, device=self.device)[..., :3], self.cur_target_pc[..., :3]], dim=0).shape}", "red")
-            # cprint(f"torch.cat([torch.tensor(combined_points_colors, device=self.device)[..., 3:], self.cur_target_pc[..., 3:]], dim=0).shape: {torch.cat([torch.tensor(combined_points_colors, device=self.device)[..., 3:], self.cur_target_pc[..., 3:]], dim=0).shape}", "red")
-            # pc_vis_debug.points = o3d.utility.Vector3dVector(torch.cat([points_all_sky_all, self.cur_target_pc[..., :3]], dim=0).detach().cpu().numpy())
-            # pc_vis_debug.colors = o3d.utility.Vector3dVector(torch.cat([colors_all_sky_all, self.cur_target_pc[..., 3:]], dim=0).detach().cpu().numpy())
-            # # pc_vis_debug.points = o3d.utility.Vector3dVector(torch.cat([points_all_sky, self.cur_target_pc[..., :3]], dim=0).detach().cpu().numpy())
-            # # pc_vis_debug.colors = o3d.utility.Vector3dVector(torch.cat([colors_all_sky, self.cur_target_pc[..., 3:]], dim=0).detach().cpu().numpy())  
-            # pc_vis_debug.colors = o3d.utility.Vector3dVector(np.asarray(pc_vis_debug.colors) / 255)
-            # o3d.visualization.draw_geometries([pc_vis_debug])
-
-            ################################    debug area ends  ##################################
-        
         point_cloud_tensor = torch.stack(point_cloud_list, dim=0)
         obs_origin["point_cloud"] = point_cloud_tensor
 
@@ -659,13 +469,12 @@ class InHandManipulationRealHandInitPCTactileSingleCamEnv(InHandManipulationReal
 
         obs_origin["contact_forces"] = contact_data
 
-        # add the agent pos
         full_obs = self.compute_full_observations()
         obs_agent_pos = full_obs[..., :24]
         obs_origin["agent_pos_gt"] = obs_agent_pos
 
         if self.cfg.observation_noise_model:
-            full_obs = self._observation_noise_model.apply(full_obs)
+            full_obs = self._observation_noise_model(full_obs)
         obs_agent_pos = full_obs[..., :24]
         obs_origin["agent_pos"] = obs_agent_pos
 
@@ -677,19 +486,20 @@ class InHandManipulationRealHandInitPCTactileSingleCamEnv(InHandManipulationReal
 
         return obs_origin
     
-    # redefine _reset_idx, we cannot use super().reset_idx here
-    ''' reset_idx: reset the [env, the obj, the target_obj], reset_target_pose: only reset the target_obj. '''
     def _reset_idx(self, env_ids: Sequence[int] | None):
+        """
+        Reset envs. Randomize camera R, T; object R, T; hand joint positions.
+        """
 
          # reset the rotation and position noise of the camera we're using
         rotation_angle_limit = 4 / 180 * np.pi
-        rand_angle_noise_x = rotation_angle_limit * (torch.rand(1).item() * 2 - 1)
-        rand_angle_noise_y = rotation_angle_limit * (torch.rand(1).item() * 2 - 1)
-        rand_angle_noise_z = rotation_angle_limit * (torch.rand(1).item() * 2 - 1)
+        rand_angle_noise_x = torch.rand((self.num_envs), dtype=self.x_unit_tensor.dtype, device=self.x_unit_tensor.device) * rotation_angle_limit * 2 - rotation_angle_limit
+        rand_angle_noise_y = torch.rand((self.num_envs), dtype=self.y_unit_tensor.dtype, device=self.y_unit_tensor.device) * rotation_angle_limit * 2 - rotation_angle_limit
+        rand_angle_noise_z = torch.rand((self.num_envs), dtype=self.z_unit_tensor.dtype, device=self.z_unit_tensor.device) * rotation_angle_limit * 2 - rotation_angle_limit
         # Apply rotation to the point cloud
-        rot_x = quat_from_angle_axis(torch.tensor(rand_angle_noise_x, dtype=self.x_unit_tensor.dtype, device=self.x_unit_tensor.device), self.x_unit_tensor.squeeze(0))
-        rot_y = quat_from_angle_axis(torch.tensor(rand_angle_noise_y, dtype=self.y_unit_tensor.dtype, device=self.y_unit_tensor.device), self.y_unit_tensor.squeeze(0))
-        rot_z = quat_from_angle_axis(torch.tensor(rand_angle_noise_z, dtype=self.z_unit_tensor.dtype, device=self.z_unit_tensor.device), self.z_unit_tensor.squeeze(0))
+        rot_x = quat_from_angle_axis(torch.tensor(rand_angle_noise_x, dtype=self.x_unit_tensor.dtype, device=self.x_unit_tensor.device), self.x_unit_tensor)
+        rot_y = quat_from_angle_axis(torch.tensor(rand_angle_noise_y, dtype=self.y_unit_tensor.dtype, device=self.y_unit_tensor.device), self.y_unit_tensor)
+        rot_z = quat_from_angle_axis(torch.tensor(rand_angle_noise_z, dtype=self.z_unit_tensor.dtype, device=self.z_unit_tensor.device), self.z_unit_tensor)
         # Combine rotations
         self.camera_rot_noise_now = quat_mul(rot_z, quat_mul(rot_y, rot_x))
 
@@ -733,44 +543,28 @@ class InHandManipulationRealHandInitPCTactileSingleCamEnv(InHandManipulationReal
         object_default_state = self.object.data.default_root_state.clone()[env_ids]
         '''Default root state ``[pos, quat, lin_vel, ang_vel]`` in local environment frame '''
 
-        # cprint(f"self.object.data.default_root_state[env_ids, :7]: {self.object.data.default_root_state[:, :7]}", "red")
-
-
-        #################################### start of seperate line ###########################################
-
-        #### we have to specify the rotation and position of the object, rather than randomize it. ######
-
-        # pos_noise = sample_uniform(-1.0, 1.0, (len(env_ids), 3), device=self.device)
-        # # global object positions
-        # '''
-        # keep the xyz position relatively still, but add some noise to the it
-        # '''
-        # object_default_state[:, 0:3] = (
-        #     object_default_state[:, 0:3] + self.cfg.reset_position_noise * pos_noise + self.scene.env_origins[env_ids]
-        # )
+        pos_noise = sample_uniform(-1.0, 1.0, (len(env_ids), 3), device=self.device)
+        object_default_state[:, 0:3] = (
+            object_default_state[:, 0:3] + self.cfg.reset_position_noise * pos_noise + self.scene.env_origins[env_ids]
+        )
 
         # Generate random rotations for the cube
-        angles = [0, np.pi / 2, np.pi, 3 * np.pi / 2, 2 * np.pi]
-        random_angle_x = torch.tensor(np.random.choice(angles), device=self.device).unsqueeze(0)
-        random_angle_y = torch.tensor(np.random.choice(angles), device=self.device).unsqueeze(0)
-        random_angle_z = torch.tensor(np.random.uniform(0, 2 * np.pi), device=self.device).unsqueeze(0)
-
+        angles = torch.tensor([0, np.pi / 2, np.pi, 3 * np.pi / 2, 2 * np.pi], device=self.device)  # 0, 90, 180, 270, 360 degrees
+        probs = torch.tensor([0.2, 0.2, 0.2, 0.2, 0.2], device=self.device)  # uniform distribution
+        random_ang_x = angles[None, torch.multinomial(probs, num_samples=len(env_ids), replacement=True)] # (len(env_ids))
+        random_ang_y = angles[None, torch.multinomial(probs, num_samples=len(env_ids), replacement=True)] # (len(env_ids))
+        random_ang_z = (torch.rand((len(env_ids),), device=self.device) * 2 * np.pi).unsqueeze(0)
         # Create rotation matrices
-        rot_x = quat_from_angle_axis(random_angle_x, self.x_unit_tensor[env_ids])
-        rot_y = quat_from_angle_axis(random_angle_y, self.y_unit_tensor[env_ids])
-        rot_z = quat_from_angle_axis(random_angle_z, self.z_unit_tensor[env_ids])
+        rot_x = quat_from_angle_axis(random_ang_x, self.x_unit_tensor[env_ids])
+        rot_y = quat_from_angle_axis(random_ang_y, self.y_unit_tensor[env_ids])
+        rot_z = quat_from_angle_axis(random_ang_z, self.z_unit_tensor[env_ids])
 
         # Combine rotations
         combined_rot = quat_mul(rot_z, quat_mul(rot_y, rot_x))
-        # cprint(f"combined_rot: {combined_rot}", "cyan")
-
-        # Apply the combined rotation to the object
         object_default_state[:, 3:7] = combined_rot
 
         rot_noise = sample_uniform(-1.0, 1.0, (len(env_ids), 2), device=self.device)  # noise for X and Y rotation
-        # object_default_state[:, 3:7] = randomize_rotation(
-        # rot_noise[:, 0], rot_noise[:, 1], self.x_unit_tensor[env_ids], self.y_unit_tensor[env_ids]
-        # )
+    
         if self.cfg.object_name in ["ring", "vase", "cup", "A", "apple", "stick", "smallvase"]:
             object_default_state[:, 3:7] = randomize_rotation(
             rot_noise[:, 0], rot_noise[:, 1], self.x_unit_tensor[env_ids], self.z_unit_tensor[env_ids]  # y-axis up
@@ -785,51 +579,32 @@ class InHandManipulationRealHandInitPCTactileSingleCamEnv(InHandManipulationReal
         
         self.object.write_root_state_to_sim(object_default_state, env_ids)
 
-        # reset hand
-        # delta_max = self.hand_dof_upper_limits[env_ids] - self.hand.data.default_joint_pos[env_ids]
-        # delta_min = self.hand_dof_lower_limits[env_ids] - self.hand.data.default_joint_pos[env_ids]
+        # Same as InHandManipulationRealEnv's robot resetting logic.
+        dof_pos = 0.8 * self.hand_dof_lower_limits + 0.2 * self.hand_dof_upper_limits
+        dof_pos = dof_pos[env_ids]
 
-        # dof_pos_noise = sample_uniform(-1.0, 1.0, (len(env_ids), self.num_hand_dofs), device=self.device)
-        # rand_delta = delta_min + (delta_max - delta_min) * 0.5 * dof_pos_noise
-        # dof_pos = self.hand.data.default_joint_pos[env_ids] + self.cfg.reset_dof_pos_noise * rand_delta
-
-        # dof_vel_noise = sample_uniform(-1.0, 1.0, (len(env_ids), self.num_hand_dofs), device=self.device)
-        # dof_vel = self.hand.data.default_joint_vel[env_ids] + self.cfg.reset_dof_vel_noise * dof_vel_noise
-
-
-        # turn off the noise
-        # dof_pos_noise = sample_uniform(-1.0, 1.0, (len(env_ids), self.num_hand_dofs), device=self.device)
-        # rand_delta = delta_min + (delta_max - delta_min) * 0.5 * dof_pos_noise
-        dof_pos = self.hand.data.default_joint_pos[env_ids]
-
-        # dof_vel_noise = sample_uniform(-1.0, 1.0, (len(env_ids), self.num_hand_dofs), device=self.device)
         dof_vel = self.hand.data.default_joint_vel[env_ids]
-
-        # cprint(f"dof_pos: {dof_pos}", "cyan")
 
         self.prev_targets[env_ids] = dof_pos
         self.cur_targets[env_ids] = dof_pos
         self.hand_dof_targets[env_ids] = dof_pos
 
-        # cprint(f"dof_pos: {dof_pos}, dof_vel: {dof_vel}", "light_yellow")  #   all 0 if no noise
-
         self.hand.set_joint_position_target(dof_pos, env_ids=env_ids)
         self.hand.write_joint_state_to_sim(dof_pos, dof_vel, env_ids=env_ids)
-
         self.successes[env_ids] = 0
         self._compute_intermediate_values()
 
         # add by STCZZZ, apply phisics step, yet don't need to update dt, action, etc cause we don't want the obj to fall
-        self.scene.write_data_to_sim()
+        # self.scene.write_data_to_sim()
         # simulate
-        self.sim.step(render=False)
+        # self.sim.step(render=False)
 
         
-        is_rendering = self.sim.has_gui() or self.sim.has_rtx_sensors()
+        # is_rendering = self.sim.has_gui() or self.sim.has_rtx_sensors()
         # make sure the synchronization between the physics and the rendering
-        if is_rendering:
-            for i in range(3):
-                self.sim.render()
+        # if is_rendering:
+        #     for i in range(3):
+        #         self.sim.render()
         
     
     def reset(self, *args, **kwargs):
@@ -840,9 +615,6 @@ class InHandManipulationRealHandInitPCTactileSingleCamEnv(InHandManipulationReal
         obs_dict["goal_env_ids"] = goal_env_ids
         obs_dict["goal_reached"] = torch.tensor([len(goal_env_ids) > 0])
         return obs_dict, extra
-
-
-
 
     
     ''' overwrite the "step" function for the collection convenience, one-word and one-line difference'''
@@ -873,7 +645,7 @@ class InHandManipulationRealHandInitPCTactileSingleCamEnv(InHandManipulationReal
         action = action.to(self.device)
         # add action noise
         if self.cfg.action_noise_model:
-            action = self._action_noise_model.apply(action)
+            action = self._action_noise_model(action)
 
         # process actions
         self._pre_physics_step(action)
@@ -892,57 +664,39 @@ class InHandManipulationRealHandInitPCTactileSingleCamEnv(InHandManipulationReal
             self.scene.write_data_to_sim()
             # simulate
             self.sim.step(render=False)
-            # render between steps only if the GUI or an RTX sensor needs it
-            # note: we assume the render interval to be the shortest accepted rendering interval.
-            #    If a camera needs rendering at a faster frequency, this will lead to unexpected behavior.
-            
-            # cprint(f"self._sim_step_counter: {self._sim_step_counter}", "yellow")
             if self._sim_step_counter % self.cfg.sim.render_interval == 0 and is_rendering:
-                
-                # cprint(f"rendering! ", "cyan")
                 self.sim.render()
             # update buffers at sim dt
             self.scene.update(dt=self.physics_dt)
 
-        # post-step:
-        # -- update env counters (used for curriculum generation)
         self.episode_length_buf += 1  # step in current episode (per env)
         self.common_step_counter += 1  # total step (common for all envs)
 
         self.reset_terminated[:], self.reset_time_outs[:] = self._get_dones()
         self.reset_buf = self.reset_terminated | self.reset_time_outs
 
-        # one-word difference here
+        # NOTE: _get_rewards() function returns an additional tensor `goal_env_ids` which contains the indices of environments where the goal has been reached.
         self.reward_buf, goal_env_ids = self._get_rewards()
 
-        # -- reset envs that terminated/timed-out and log the episode information
         reset_env_ids = self.reset_buf.nonzero(as_tuple=False).squeeze(-1)
-
 
         if len(reset_env_ids) > 0:
             self._reset_idx(reset_env_ids)
 
-        # post-step: step interval event
         if self.cfg.events:
             if "interval" in self.event_manager.available_modes:
                 self.event_manager.apply(mode="interval", dt=self.step_dt)
 
-        # update observations
         self.obs_buf = self._get_observations()
 
         # add observation noise
         # note: we apply no noise to the state space (since it is used for critic networks)
         if self.cfg.observation_noise_model:
-            self.obs_buf["policy"] = self._observation_noise_model.apply(self.obs_buf["policy"])
+            self.obs_buf["policy"] = self._observation_noise_model(self.obs_buf["policy"])
         
-        # one_line_difference_here
+        # NOTE: adding goal_env_ids and goal_reached to 'obs_buf' key.
         self.obs_buf["goal_env_ids"] = goal_env_ids
-        
         self.obs_buf["goal_reached"] = torch.tensor([len(goal_env_ids) > 0])
-        # cprint(f"[Inhand_Mani_Handinit_PC_Tactile_Env: STEP ]goal_env_ids: {goal_env_ids}", "yellow")
-
-        
-        # return observations, rewards, resets and extras
         return self.obs_buf, self.reward_buf, self.reset_terminated, self.reset_time_outs, self.extras
     
 

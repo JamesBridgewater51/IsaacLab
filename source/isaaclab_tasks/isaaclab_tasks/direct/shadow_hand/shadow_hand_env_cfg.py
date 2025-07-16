@@ -192,7 +192,7 @@ OBJ_ATTR_DICT = {
     },
     "apple":{
         "color": None,
-        "scale": (0.16, 0.16,  0.16),
+        "scale": (0.10, 0.10, 0.10),
         "moving_avg": 0.3,
     },
     "stick":{

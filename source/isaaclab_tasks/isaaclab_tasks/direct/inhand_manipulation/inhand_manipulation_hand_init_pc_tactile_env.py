@@ -660,7 +660,7 @@ class InHandManipulationHandInitPCTactileEnv(InHandManipulationEnv):
         action = action.to(self.device)
         # add action noise
         if self.cfg.action_noise_model:
-            action = self._action_noise_model.apply(action)
+            action = self._action_noise_model(action)
 
         # process actions
         self._pre_physics_step(action)
@@ -719,7 +719,7 @@ class InHandManipulationHandInitPCTactileEnv(InHandManipulationEnv):
         # add observation noise
         # note: we apply no noise to the state space (since it is used for critic networks)
         if self.cfg.observation_noise_model:
-            self.obs_buf["policy"] = self._observation_noise_model.apply(self.obs_buf["policy"])
+            self.obs_buf["policy"] = self._observation_noise_model(self.obs_buf["policy"])
         
         # one_line_difference_here
         self.obs_buf["goal_env_ids"] = goal_env_ids

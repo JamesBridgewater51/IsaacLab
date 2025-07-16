@@ -52,18 +52,20 @@ class InHandManipulationRealEnv(DirectRLEnv):
                 self.wrist_indices.append(self.hand.joint_names.index(wrist_name))
             self.wrist_indices.sort()
         
-        self.mimic_dof_indices = list()
-        for joint_name in cfg.mimic_joint_names:
-            self.mimic_dof_indices.append(self.hand.joint_names.index(joint_name))
-        self.mimic_dof_indices.sort()
+        self.joint_coupling_data = []
+        if hasattr(self.cfg, "joint_couplings"):
+            for coupling in self.cfg.joint_couplings:
+                actuated_idx = self.hand.joint_names.index(coupling["actuated"])
+                mimicked_indices = [self.hand.joint_names.index(name) for name in coupling["mimicked"]]
+                ratios = torch.tensor(coupling["ratios"], device=self.device)
+                
+                self.joint_coupling_data.append({
+                    "actuated_idx": actuated_idx,
+                    "mimicked_indices": mimicked_indices,
+                    "ratios": ratios
+                })
 
-        self.to_mimic_dof_indices = list()
-        for joint_name in cfg.to_mimic_joint_names:
-            self.to_mimic_dof_indices.append(self.hand.joint_names.index(joint_name))
-        self.to_mimic_dof_indices.sort()
-
-
-        # finger bodies
+        # finger bodiees
         self.finger_bodies = list()
         for body_name in self.cfg.fingertip_body_names:
             self.finger_bodies.append(self.hand.body_names.index(body_name))
@@ -88,9 +90,7 @@ class InHandManipulationRealEnv(DirectRLEnv):
         self.goal_rot[:, 0] = 1.0
         self.goal_pos = torch.zeros((self.num_envs, 3), dtype=torch.float, device=self.device)
         self.goal_pos[:, :] = torch.tensor([-0.2, -0.45, 0.68], device=self.device)
-        # self.goal_pos[:, :] = torch.tensor([-0.2, -0.45, 0.58], device=self.device)
-        # self.goal_pos[:, :] = torch.tensor([0, -0.3, 0.5], device=self.device)
-        # self.goal_pos[:, :] = self.in_hand_pos
+
         # initialize goal marker
         self.goal_markers = VisualizationMarkers(self.cfg.goal_object_cfg)
 
@@ -106,26 +106,39 @@ class InHandManipulationRealEnv(DirectRLEnv):
         cprint(f"[InHandManipulationRealEnv] self.cfg.decimation: {self.cfg.decimation}", "green")
 
         # specific traj_number is not available
-    
+
     def _proprocess_cur_target(self, cur_target):
-        # 这里要说明一下，因为我发现那些mimic joint 和 to_mimic joint 的范围都是0～1.57，所以我推断这里是 0~1.57(pi / 2) -> 0~90
-        target_mimic = cur_target[:, self.mimic_dof_indices]
-        target_to_mimic = cur_target[:, self.to_mimic_dof_indices]
-        sum_mimic_to_mimic = target_mimic + target_to_mimic
+        """
+        Applies complex joint coupling constraints based on the environment configuration.
+        This version handles both 1-to-1 and 1-to-many couplings.
+        """
+        # If no coupling data is defined, return the original targets
+        if not hasattr(self, "joint_coupling_data") or not self.joint_coupling_data:
+            return cur_target
 
-        upper_to_mimic = self.hand_dof_upper_limits[:, self.to_mimic_dof_indices]
-        over_mimic_amount = sum_mimic_to_mimic - upper_to_mimic
-        over_mimic_amount = torch.clip(over_mimic_amount, 0, None)
+        # Create a copy to modify
+        processed_target = cur_target.clone()
 
-        cur_target[:, self.mimic_dof_indices] = over_mimic_amount
+        # Iterate through each defined coupling relationship
+        for coupling in self.joint_coupling_data:
+            actuated_idx = coupling["actuated_idx"]
+            mimicked_indices = coupling["mimicked_indices"]
+            ratios = coupling["ratios"]
 
-        clip_sum_mimic_to_mimic = saturate(sum_mimic_to_mimic, self.hand_dof_lower_limits[:, self.to_mimic_dof_indices], self.hand_dof_upper_limits[:, self.to_mimic_dof_indices])
-        cur_target[:, self.to_mimic_dof_indices] = clip_sum_mimic_to_mimic
+            # Get the target position of the driving (actuated) joint
+            # Note: The target is for a single joint, but we keep the dim for broadcasting
+            actuated_target = cur_target[:, actuated_idx].unsqueeze(1)
 
-        return cur_target
+            # Calculate the target positions for all mimicked joints based on the ratios
+            # This handles both 1-to-1 and 1-to-many cases elegantly.
+            # Shape will be (num_envs, num_mimicked_joints)
+            mimicked_targets = actuated_target * ratios
+
+            # Apply the calculated targets to the corresponding mimicked joints
+            # We use advanced indexing to set the values for all mimicked joints at once.
+            processed_target[:, mimicked_indices] = mimicked_targets
         
-
-
+        return processed_target
 
     def _setup_scene(self):
         # add hand, in-hand object, and goal object
@@ -144,93 +157,48 @@ class InHandManipulationRealEnv(DirectRLEnv):
         light_cfg.func("/World/Light", light_cfg)
     
     def _pro_process_action(self, action):
-        '''
-        scale 有两步
-        1. 把action变成0~1之间的数，表示从lower -> upper 中的一个程度，也就是action占lower->upper之间的多少，原来的action是-1~1之间的数字，
-        2. 用upper 和 lower 来夹这个数字，最后得到的数字就是夹在lower和upper之间的一个插值，其中插的程度是由第一步的结果给出来的
-
-        而本身hand_dof_pos就是这个插在中间的值，如果想得到-1 ~ 1 之间的值需要用unscale来还原回去
-        所以joint_state和action其实都是 -1 ~ 1 之间的一个值，是同一个级别的
-        对应的 target(也就是scaled_action) 和 hand_dof_pos 是同一个级别的
-        所以我觉得我们要IL 学的那个action如果要平滑一点的话应该就是要和现在的hand_pos做一个插值，让他的target别搞那么大，也就是不能偏离current 太多
-        而它原本isaaclab这个写的moving average只是在target之间做插值，而且是针对每一帧来做插值，只能起到让仿真看起来smooth一点的效果，不能从本质上解决action 不平滑的问题
-
-        TODO: 还是要让action像他们一样，预测的是delta theta呢 哦但我其实这样做，其实就是在限制delta theta了，因为我在用scaled_action 和 hand_pos做插值，所以我相当于限制了这个东西最多只能在原来的基础上加上0.3了
-        '''
         action_scaled = scale(
             action,
             self.hand_dof_lower_limits[:, self.actuated_dof_indices],
             self.hand_dof_upper_limits[:, self.actuated_dof_indices],
         )
-        action_scaled = self.cfg.action_interpolation * action_scaled + (1.0 - self.cfg.action_interpolation) * self.hand_dof_pos[:, self.actuated_dof_indices]
-        # action_scaled = self.hand_dof_upper_limits[:, self.actuated_dof_indices]
+        # FIXME: temporarily disable EMA between pred_actions and current dof_pos.
+        # action_scaled = self.cfg.action_interpolation * action_scaled + (1.0 - self.cfg.action_interpolation) * self.hand_dof_pos[:, self.actuated_dof_indices]
         if self.cfg.fix_wrist == True:
-            for idx in self.wrist_indices:
-                # cprint(f"fix_wrist: {idx}", "yellow")
-                # action_scaled[..., idx] = self.hand_dof_pos[..., idx]    # use the current value(0 as the interpolation weight)
-                action_scaled[..., idx] = 0.0    # use the current value(0 as the interpolation weight)
-                # cprint(f"action_scaled[..., idx]: {action_scaled[..., idx]}", "yellow")
+            action_scaled[..., self.wrist_indices] = 0.0
         return action_scaled
 
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
-        # cprint(f"actions: {actions}", "yellow")
-        self.actions = self._pro_process_action(actions.clone())    # encourage smooth behavior   # 这里 actions 已经是角度了, 已经不是网络输出的,可能是-1~1之间的值了
-        # just for debug
-        # self.actions = torch.tensor([[ 0.0000, -0.3231, -0.1289,  1.0, -0.3046, -0.1845,  0.7977,  0.4384, 1.0,  0.3194,  0.1687,  0.5316,  0.6175,  0.8374,  0.8922,  1.5614, 0.1875,  0.1793,  0.8305, -0.0041,  0.1409,  0.1844,  0.3265,  0.5022]],device='cuda:0')    # encourage smooth behavior
-
-        # self.actions = torch.tensor([[-1.2591e-02, -4.4374e-01, -3.3057e-01,  1.8382e-01,  2.9713e-01, 7.6149e-04,  9.4231e-01,  1.0862e-02,  2.6602e-01,  1.2869e+00, 1.5626e-01,  2.0641e-02,  1.0797e+00,  1.0999e+00,  1.5564e+00, 1.3796e+00,  1.7657e-01,  5.5555e-02,  1.1075e+00,  1.1412e+00, 6.3222e-01, -4.6757e-01,  3.3588e-01,  1.1462e+00]], device='cuda:0')
-
-        # cprint(f"self.actions: {self.actions}", "yellow")
-        # if self.cfg.fix_wrist == True:
-        #     for idx in self.wrist_indices:
-        #         self.actions[:, idx] = 0.0
-        # cprint(f"self.cfg.fix_wrist: {self.cfg.fix_wrist}", "yellow")
-        # cprint(f"self.actions: {self.actions}", "yellow")
+        self.actions = self._pro_process_action(actions.clone())   
 
     def _apply_action(self) -> None:
-        # self.cur_targets[:, self.actuated_dof_indices] = scale(
-        #     self.actions,
-        #     self.hand_dof_lower_limits[:, self.actuated_dof_indices],
-        #     self.hand_dof_upper_limits[:, self.actuated_dof_indices],
-        # )
-
         self.cur_targets[:, self.actuated_dof_indices] = self.actions
-        # cprint(f"self.prev_targets[:, self.actuated_dof_indices]: {self.prev_targets[:, self.actuated_dof_indices]}", "yellow")
-        # cprint(f"self.actions: {self.actions}", "yellow")
-        # cprint(f"primed_actions[:, self.actuated_dof_indices]: {self.cur_targets[:, self.actuated_dof_indices]}", "yellow")
+        
         self.cur_targets[:, self.actuated_dof_indices] = (
             self.cfg.act_moving_average * self.cur_targets[:, self.actuated_dof_indices]
             + (1.0 - self.cfg.act_moving_average) * self.prev_targets[:, self.actuated_dof_indices]
         )
-        # cprint(f"self.cur_targets[:, self.actuated_dof_indices]: {self.cur_targets[:, self.actuated_dof_indices]}", "cyan")
-        # self.cur_targets[:, self.actuated_dof_indices] = torch.zeros_like(self.cur_targets[:, self.actuated_dof_indices])
-        # self.cur_targets[:, 1] = 1.0
-        self.cur_targets[:, self.actuated_dof_indices] = saturate(
-            self.cur_targets[:, self.actuated_dof_indices],
-            self.hand_dof_lower_limits[:, self.actuated_dof_indices],
-            self.hand_dof_upper_limits[:, self.actuated_dof_indices],
+        
+        # Apply the tendon system coupling constraints
+        self.cur_targets = self._proprocess_cur_target(self.cur_targets)
+
+        self.cur_targets = saturate(
+            self.cur_targets,
+            self.hand_dof_lower_limits,
+            self.hand_dof_upper_limits,
         )
-        self.cur_targets[:, self.actuated_dof_indices] = self._proprocess_cur_target(self.cur_targets[:, self.actuated_dof_indices])
 
-        # self.cur_targets[:, self.actuated_dof_indices] = self.hand_dof_upper_limits[:, self.actuated_dof_indices]
-        # self.cur_targets[:, self.actuated_dof_indices] = self.hand_dof_upper_limits[:, self.actuated_dof_indices] * 0.6
-        # add
-        # self.cur_targets = self._proprocess_cur_target(self.cur_targets)
-        self.prev_targets[:, self.actuated_dof_indices] = self.cur_targets[:, self.actuated_dof_indices]
-        # cprint(f"self.cur_targets.shape: {self.cur_targets.shape}", "grey")
-
-        # for debug
-        # self.cur_targets[:, self.actuated_dof_indices] = self.hand_dof_upper_limits[:, self.actuated_dof_indices]
-        # self.cur_targets[:, self.actuated_dof_indices] = self.hand_dof_upper_limits[:, self.actuated_dof_indices] * 0.5
-        # self.cur_targets[:, 17] = self.hand_dof_lower_limits[:, 17]
+        self.prev_targets = self.cur_targets.clone()
 
         self.hand.set_joint_position_target(
-            self.cur_targets[:, self.actuated_dof_indices], joint_ids=self.actuated_dof_indices
+            self.cur_targets, joint_ids=None
         )
-        # cprint(f"scaled self.actions: {scale(self.actions,self.hand_dof_lower_limits[:, self.actuated_dof_indices],self.hand_dof_upper_limits[:, self.actuated_dof_indices],)}", "yellow")
-        # cprint(f"self.hand.joint_names: {self.hand.joint_names}", "yellow")
-        # cprint(f"self.cur_targets: {self.cur_targets}", "grey")
+        self.hand.write_data_to_sim()
+        if self.hand.data.body_pos_w.isnan().any():
+            breakpoint()
+        if not ((self.cur_targets <= self.hand_dof_upper_limits) & (self.hand_dof_lower_limits <= self.cur_targets)).all():
+            breakpoint()
 
     def _get_observations(self) -> dict:
         if self.cfg.asymmetric_obs:
@@ -251,11 +219,6 @@ class InHandManipulationRealEnv(DirectRLEnv):
         observations = {"policy": obs}
         if self.cfg.asymmetric_obs:
             observations = {"policy": obs, "critic": states}
-        # obj_pos = states[..., 48:51].squeeze(0)
-        # obj_rot = states[..., 51:55].squeeze(0)
-        # cprint(f"obj_pos, obj_rot: {obj_pos}, {obj_rot}", 'magenta')
-        # cprint(f"self.goal_pos, self.goal_rot: {self.goal_pos}, {self.goal_rot}", 'yellow')
-
 
         return observations
 
@@ -341,7 +304,7 @@ class InHandManipulationRealEnv(DirectRLEnv):
 
         #################################### start of seperate line ###########################################
 
-        pos_noise = sample_uniform(-1.0, 1.0, (len(env_ids), 3), device=self.device)
+        pos_noise = sample_uniform(-0.1, 0.1, (len(env_ids), 3), device=self.device)
         # global object positions
         '''
         keep the xyz position relatively still, but add some noise to the it
@@ -360,59 +323,22 @@ class InHandManipulationRealEnv(DirectRLEnv):
             object_default_state[:, 3:7] = randomize_rotation(
             rot_noise[:, 0], rot_noise[:, 1], self.x_unit_tensor[env_ids], self.z_unit_tensor[env_ids]  # y-axis up
         )
-        # if isinstance(self.cfg, ShadowHandRealHandInitEnvCfg):
-        #     angles = [0, np.pi / 2, np.pi, 3 * np.pi / 2, 2 * np.pi]
-        #     random_angle_x = torch.tensor(np.random.choice(angles), device=self.device).unsqueeze(0)
-        #     random_angle_y = torch.tensor(np.random.choice(angles), device=self.device).unsqueeze(0)
-        #     random_angle_z = torch.tensor(np.random.uniform(0, 2 * np.pi), device=self.device).unsqueeze(0)
-
-        #     # Create rotation matrices
-        #     rot_x = quat_from_angle_axis(random_angle_x, self.x_unit_tensor[env_ids])
-        #     rot_y = quat_from_angle_axis(random_angle_y, self.y_unit_tensor[env_ids])
-        #     rot_z = quat_from_angle_axis(random_angle_z, self.z_unit_tensor[env_ids])
-
-        #     # Combine rotations
-        #     combined_rot = quat_mul(rot_z, quat_mul(rot_y, rot_x))
-        #     # cprint(f"combined_rot: {combined_rot}", "cyan")
-
-        #     # Apply the combined rotation to the object
-        #     object_default_state[:, 3:7] = combined_rot
-
-
+     
         object_default_state[:, 7:] = torch.zeros_like(self.object.data.default_root_state[env_ids, 7:])
         self.object.write_root_state_to_sim(object_default_state, env_ids)
+        
+        dof_pos = 0.8 * self.hand_dof_lower_limits + 0.2 * self.hand_dof_upper_limits
+        dof_pos = dof_pos[env_ids]
 
-        # reset hand
-        # delta_max = self.hand_dof_upper_limits[env_ids] - self.hand.data.default_joint_pos[env_ids]
-        # delta_min = self.hand_dof_lower_limits[env_ids] - self.hand.data.default_joint_pos[env_ids]
-
-        # dof_pos_noise = sample_uniform(-1.0, 1.0, (len(env_ids), self.num_hand_dofs), device=self.device)
-        # rand_delta = delta_min + (delta_max - delta_min) * 0.5 * dof_pos_noise
-        # dof_pos = self.hand.data.default_joint_pos[env_ids] + self.cfg.reset_dof_pos_noise * rand_delta
-
-        # dof_vel_noise = sample_uniform(-1.0, 1.0, (len(env_ids), self.num_hand_dofs), device=self.device)
-        # dof_vel = self.hand.data.default_joint_vel[env_ids] + self.cfg.reset_dof_vel_noise * dof_vel_noise
-
-
-        # turn off the noise
-        # dof_pos_noise = sample_uniform(-1.0, 1.0, (len(env_ids), self.num_hand_dofs), device=self.device)
-        # rand_delta = delta_min + (delta_max - delta_min) * 0.5 * dof_pos_noise
-        dof_pos = self.hand.data.default_joint_pos[env_ids]
-
-        # dof_vel_noise = sample_uniform(-1.0, 1.0, (len(env_ids), self.num_hand_dofs), device=self.device)
         dof_vel = self.hand.data.default_joint_vel[env_ids]
 
         self.prev_targets[env_ids] = dof_pos
         self.cur_targets[env_ids] = dof_pos
         self.hand_dof_targets[env_ids] = dof_pos
 
-        # cprint(f"dof_pos: {dof_pos}, dof_vel: {dof_vel}", "light_yellow")  #   all 0 if no noise
         self.hand.set_joint_position_target(dof_pos, env_ids=env_ids)
-        # cprint(f"dof_pos:{dof_pos}", "red")
         self.hand.write_joint_state_to_sim(dof_pos, dof_vel, env_ids=env_ids)
         self.successes[env_ids] = 0
-        # self.sim.step(render=True)
-        # time.sleep(5)
         self._compute_intermediate_values()
 
         
@@ -447,11 +373,7 @@ class InHandManipulationRealEnv(DirectRLEnv):
         self.fingertip_pos -= self.scene.env_origins.repeat((1, self.num_fingertips)).reshape(
             self.num_envs, self.num_fingertips, 3
         )
-        # from termcolor import cprint
-        # cprint(f"[InhandManipulationEnv] computing intermediate values! ", "blue")
-        # cprint(f"self.hand.data.body_pos_w[:, self.finger_bodies]: {self.hand.data.body_pos_w[:, self.finger_bodies]}", "blue")
-        # cprint(f"self.scene.env_origins.repeat((1, self.num_fingertips)).reshape(self.num_envs, self.num_fingertips, 3): {self.scene.env_origins.repeat((1, self.num_fingertips)).reshape(self.num_envs, self.num_fingertips, 3)}", "blue")
-        # cprint(f"self.fingertip_pos: {self.fingertip_pos}", "blue")
+
         self.fingertip_velocities = self.hand.data.body_vel_w[:, self.finger_bodies]
 
         self.hand_dof_pos = self.hand.data.joint_pos
@@ -464,25 +386,13 @@ class InHandManipulationRealEnv(DirectRLEnv):
         self.object_linvel = self.object.data.root_lin_vel_w
         self.object_angvel = self.object.data.root_ang_vel_w
 
-        # cprint(f"self.joint_names: {self.hand.joint_names}", "red")
-        # cprint(f"hand_dof_pos[..., self.actuated_dof_indices]: {self.hand_dof_pos[..., self.actuated_dof_indices]}", "red")
-        # cprint(f"hand_dof_pos: {self.hand_dof_pos}", "red")
-        # # cprint(f"unscale_hand_dof_pos[..., self.actuated_dof_indices]: {unscale(self.hand_dof_pos, self.hand_dof_lower_limits, self.hand_dof_upper_limits)[..., self.actuated_dof_indices]}", "red")
-        # cprint(f"*"*50, "cyan")
 
     def compute_reduced_observations(self):
         # Per https://arxiv.org/pdf/1808.00177.pdf Table 2
         #   Fingertip positions
         #   Object Position, but not orientation
         #   Relative target orientation
-        # cprint(f"self.goal_rot: {self.goal_rot}", "magenta")
-        # cprint(f"quat_conjugate(self.goal_rot): {quat_conjugate(self.goal_rot)}", "magenta")
-        # cprint(f"self.max_episode_length: {self.max_episode_length}", "yellow")
-        # cprint(f"self.max_episode_length_s: {self.max_episode_length_s}", "yellow")
-        # cprint(f"self.fingertip_pos.view(self.num_envs, self.num_fingertips * 3).shape: {self.fingertip_pos.view(self.num_envs, self.num_fingertips * 3).shape}", "magenta")
-        # cprint(f"self.object_pos.shape: {self.object_pos.shape}", "magenta")
-        # cprint(f"quat_mul(self.object_rot, quat_conjugate(self.goal_rot)).shape: {quat_mul(self.object_rot, quat_conjugate(self.goal_rot)).shape}", "magenta")
-        # cprint(f"self.actions.shape: {self.actions}", "magenta")
+
         obs = torch.cat(
             (
                 self.fingertip_pos.view(self.num_envs, self.num_fingertips * 3),
@@ -492,76 +402,10 @@ class InHandManipulationRealEnv(DirectRLEnv):
             ),
             dim=-1,
         )
-        # cprint(f"agent_pos: {unscale(self.hand_dof_pos, self.hand_dof_lower_limits, self.hand_dof_upper_limits)}", "magenta")
-        # cprint(f"lower_limit: {self.hand_dof_lower_limits}", "green")
-        # cprint(f"upper_limit: {self.hand_dof_upper_limits}", "green")
-        # from termcolor import cprint
-        # # cprint(f"[InhandManipulationEnv] computing reduced observations! ", "blue")
-        # cprint(f"[InhandManipulationEnv] self.fingertip_pos.view(self.num_envs, self.num_fingertips * 3): {self.fingertip_pos.view(self.num_envs, self.num_fingertips * 3)}", "blue")
-
-
-        # cprint(f"obs.shape: {obs.shape}", "magenta")
-        # cprint(f"*"*50, "cyan")
-
-        # obj_rot = random_orientation(1, device='cpu')
-
-        # goal_rot = random_orientation(1, device='cpu')
-
-        # from termcolor import cprint
-
-        # a = quat_mul(obj_rot, quat_conjugate(goal_rot))
-
-        # cprint(f"obj_rot: {obj_rot}", "green")
-        # cprint(f"goal_rot: {goal_rot}", "green")
-        # cprint(f"a: {a}", "green")
-
-        # goal_rot_conj = quat_conjugate(goal_rot)
-        # obj_rot_pred = quat_mul(a, goal_rot_conj)
-        # cprint(f"obj_rot_pred: {obj_rot_pred}", "red")
-
-        # assert(torch.all(obj_rot_pred == obj_rot))
-
-        ''' 
-
-        self.goal_rot: tensor([[1., 0., 0., 0.]], device='cuda:0')
-        quat_conjugate(self.goal_rot): tensor([[1., 0., 0., 0.]], device='cuda:0')
-        self.max_episode_length: 2000
-        self.max_episode_length_s: 100.0
-        **************************************************
-
-
-        self.fingertip_pos.view(self.num_envs, self.num_fingertips * 3).shape: torch.Size([1, 15])
-        self.object_pos.shape: torch.Size([1, 3])
-        quat_mul(self.object_rot, quat_conjugate(self.goal_rot)).shape: torch.Size([1, 4])
-        self.actions.shape: torch.Size([1, 20])
-        obs.shape: torch.Size([1, 42])
-        '''
 
         return obs
 
     def compute_full_observations(self):
-        # add for debug: 
-        # from termcolor import cprint
-        # hand_data = torch.cat(
-        #     [unscale(self.hand_dof_pos, self.hand_dof_lower_limits, self.hand_dof_upper_limits),
-        #         self.cfg.vel_obs_scale * self.hand_dof_vel,], dim=-1)
-        # cprint(f"hand.shape: {hand_data.shape}", "magenta")
-        # hand_half = unscale(
-        #     self.hand_dof_pos, self.hand_dof_lower_limits, self.hand_dof_upper_limits
-        # )
-        # cprint(f"hand_half.shape: {hand_half.shape}", "magenta")
-        '''
-        hand.shape: torch.Size([1, 48])
-        hand_half.shape: torch.Size([1, 24])
-        '''
-        # cprint(f"unscale(self.hand_dof_pos, self.hand_dof_lower_limits, self.hand_dof_upper_limits): {unscale(self.hand_dof_pos, self.hand_dof_lower_limits, self.hand_dof_upper_limits)}", "magenta")
-        # cprint(f"self.object_pos: {self.object_pos}", "magenta")
-        # cprint(f"self.object_rot: {self.object_rot}", "magenta")
-        # cprint(f"self.actions: {self.actions}", "magenta")
-        # cprint(f"self.actions: {self.actions}", "light_red")
-        # cprint(f"self.cur_targets: {self.cur_targets}", "magenta")
-        # cprint(f"self.hand_dof_pos: {self.hand_dof_pos}", "magenta")
-        # cprint(f"*"*20, "cyan")
         obs = torch.cat(
             (
                 # hand
@@ -614,54 +458,15 @@ class InHandManipulationRealEnv(DirectRLEnv):
             ),
             dim=-1,
         )
-
-        # from termcolor import cprint
-        # cprint(f"states.shape: {states.shape}", "magenta")
-        # cprint(f"unscale(self.hand_dof_pos, self.hand_dof_lower_limits, self.hand_dof_upper_limits).shape: {unscale(self.hand_dof_pos, self.hand_dof_lower_limits, self.hand_dof_upper_limits).shape}", "magenta")
-        # cprint(f"self.cfg.vel_obs_scale * self.hand_dof_vel.shape: {(self.cfg.vel_obs_scale * self.hand_dof_vel).shape}", "magenta")
-        # cprint(f"self.object_pos.shape: {self.object_pos.shape}", "magenta")
-        # cprint(f"self.object_rot.shape: {self.object_rot.shape}", "magenta")
-        # cprint(f"self.object_linvel.shape: {self.object_linvel}", "magenta")
-        # cprint(f"self.cfg.vel_obs_scale * self.object_angvel.shape: {(self.cfg.vel_obs_scale * self.object_angvel)}", "magenta")
-
-        # # goal
-        # cprint(f"self.in_hand_pos.shape: {self.in_hand_pos.shape}", "magenta")
-        # cprint(f"self.goal_rot.shape: {self.goal_rot.shape}", "magenta")
-        # cprint(f"quat_mul(self.object_rot, quat_conjugate(self.goal_rot)).shape: {quat_mul(self.object_rot, quat_conjugate(self.goal_rot)).shape}", "magenta")
-
-        # cprint(f"*"*20, "cyan")
-
-        '''
-        states.shape: torch.Size([1, 187])
-        unscale(self.hand_dof_pos, self.hand_dof_lower_limits, self.hand_dof_upper_limits).shape: torch.Size([1, 24])
-        self.cfg.vel_obs_scale * self.hand_dof_vel.shape: torch.Size([1, 24])
-        self.object_pos.shape: torch.Size([1, 3])
-        self.object_rot.shape: torch.Size([1, 4])
-        self.object_linvel.shape: torch.Size([1, 3])
-        self.cfg.vel_obs_scale * self.object_angvel.shape: torch.Size([1, 3])
-        self.in_hand_pos.shape: torch.Size([1, 3])
-        self.goal_rot.shape: torch.Size([1, 4])
-        quat_mul(self.object_rot, quat_conjugate(self.goal_rot)).shape: torch.Size([1, 4])
-        '''
-
-
-
         return states
 
 
 @torch.jit.script
 def scale(x, lower, upper):
     return 0.5 * (x + 1.0) * (upper - lower) + lower
-# 0.5x(upper - lower) + 0.5(upper + lower)
-
-# (x + 1) * (upper - lower) + 2 * lower = x * (upper - lower) + upper + lower
-
 
 @torch.jit.script
 def unscale(x, lower, upper):
-    '''
-    x / () * 2 - 1, x / () 在 (0, 1)之间，所以 * 2 - 1 之后在 (-1, 1)之间
-    '''
     return (2.0 * x - upper - lower) / (upper - lower)
 
 

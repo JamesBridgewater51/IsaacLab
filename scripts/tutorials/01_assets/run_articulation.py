@@ -39,101 +39,77 @@ import isaacsim.core.utils.prims as prim_utils
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
 from isaaclab.sim import SimulationContext
+from isaaclab.scene import InteractiveSceneCfg, InteractiveScene
 
-##
-# Pre-defined configs
-##
-from isaaclab_assets import CARTPOLE_CFG  # isort:skip
-
-
-def design_scene() -> tuple[dict, list[list[float]]]:
-    """Designs the scene."""
-    # Ground-plane
-    cfg = sim_utils.GroundPlaneCfg()
-    cfg.func("/World/defaultGroundPlane", cfg)
-    # Lights
-    cfg = sim_utils.DomeLightCfg(intensity=3000.0, color=(0.75, 0.75, 0.75))
-    cfg.func("/World/Light", cfg)
-
-    # Create separate groups called "Origin1", "Origin2"
-    # Each group will have a robot in it
-    origins = [[0.0, 0.0, 0.0], [-1.0, 0.0, 0.0]]
-    # Origin 1
-    prim_utils.create_prim("/World/Origin1", "Xform", translation=origins[0])
-    # Origin 2
-    prim_utils.create_prim("/World/Origin2", "Xform", translation=origins[1])
-
-    # Articulation
-    cartpole_cfg = CARTPOLE_CFG.copy()
-    cartpole_cfg.prim_path = "/World/Origin.*/Robot"
-    cartpole = Articulation(cfg=cartpole_cfg)
-
-    # return the scene information
-    scene_entities = {"cartpole": cartpole}
-    return scene_entities, origins
+from isaaclab_assets.robots.o12_hand import O12_HAND_CFG
+from isaaclab_assets.robots.shadow_hand import SHADOW_HAND_CFG, SHADOW_HAND_COLORED_CFG
 
 
-def run_simulator(sim: sim_utils.SimulationContext, entities: dict[str, Articulation], origins: torch.Tensor):
+def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     """Runs the simulation loop."""
     # Extract scene entities
-    # note: we only do this here for readability. In general, it is better to access the entities directly from
-    #   the dictionary. This dictionary is replaced by the InteractiveScene class in the next tutorial.
-    robot = entities["cartpole"]
+    robot = scene["robot"]
     # Define simulation stepping
     sim_dt = sim.get_physics_dt()
     count = 0
     # Simulation loop
     while simulation_app.is_running():
-        # Reset
-        if count % 500 == 0:
-            # reset counter
-            count = 0
-            # reset the scene entities
-            # root state
-            # we offset the root state by the origin since the states are written in simulation world frame
-            # if this is not done, then the robots will be spawned at the (0, 0, 0) of the simulation world
-            root_state = robot.data.default_root_state.clone()
-            root_state[:, :3] += origins
-            robot.write_root_pose_to_sim(root_state[:, :7])
-            robot.write_root_velocity_to_sim(root_state[:, 7:])
-            # set joint positions with some noise
-            joint_pos, joint_vel = robot.data.default_joint_pos.clone(), robot.data.default_joint_vel.clone()
-            joint_pos += torch.rand_like(joint_pos) * 0.1
-            robot.write_joint_state_to_sim(joint_pos, joint_vel)
-            # clear internal buffers
-            robot.reset()
-            print("[INFO]: Resetting robot state...")
-        # Apply random action
-        # -- generate random joint efforts
-        efforts = torch.randn_like(robot.data.joint_pos) * 5.0
-        # -- apply action to the robot
-        robot.set_joint_effort_target(efforts)
-        # -- write data to sim
+    
+        
+        # Apply random action every step for more dynamic movement
+        joint_pos_limits = robot.root_physx_view.get_dof_limits()
+        hand_dof_lower_limits, hand_dof_upper_limits = joint_pos_limits[:, :, 0], joint_pos_limits[:, :, 1]
+        action = (hand_dof_lower_limits + hand_dof_upper_limits) / 2.0
+        robot.set_joint_position_target(action, joint_ids=None)
         robot.write_data_to_sim()
-        # Perform step
+        if robot.data.body_pos_w.isnan().any():
+            print(f"[ERROR]: Body position contains NaN values. Resetting simulation. Count: {count}")
+            # Reset the simulation if NaN values are detected
+            sim.reset()
+            continue
+        
+        # Perform simulation step
         sim.step()
         # Increment counter
         count += 1
-        # Update buffers
-        robot.update(sim_dt)
-
+        # Update scene buffers
+        scene.update(dt=sim_dt)
 
 def main():
     """Main function."""
     # Load kit helper
     sim_cfg = sim_utils.SimulationCfg(device=args_cli.device)
     sim = SimulationContext(sim_cfg)
+
+    # Configure the scene for 2 environments
+    scene_cfg = InteractiveSceneCfg(num_envs=2, env_spacing=1.0, replicate_physics=True)
+
+    # 1. First, create the InteractiveScene. This command creates the '/World/envs/env_*' prims.
+    scene = InteractiveScene(scene_cfg)
+
+    o12_hand_cfg = O12_HAND_CFG.copy()
+    o12_hand_cfg.prim_path = "/World/envs/env_.*/Robot"
+    o12_hand = Articulation(cfg=o12_hand_cfg)
+
+    # sr_hand_cfg = SHADOW_HAND_COLORED_CFG.copy()
+    # sr_hand_cfg.prim_path = "/World/envs/env_.*/Robot"
+    # sr_hand = Articulation(cfg=sr_hand_cfg)
+
+    scene.articulations['robot'] = o12_hand
+    scene.clone_environments(copy_from_source=True)
+    light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.35, 0.08, 0.08))
+    light_cfg.func("/World/Light", light_cfg)
+
     # Set main camera
-    sim.set_camera_view([2.5, 0.0, 4.0], [0.0, 0.0, 2.0])
-    # Design scene
-    scene_entities, scene_origins = design_scene()
-    scene_origins = torch.tensor(scene_origins, device=sim.device)
+    sim.set_camera_view([2.5, 0.0, 4.0], [0.0, 0.0, 0.5])
+
     # Play the simulator
     sim.reset()
+
     # Now we are ready!
     print("[INFO]: Setup complete...")
     # Run the simulator
-    run_simulator(sim, scene_entities, scene_origins)
+    run_simulator(sim, scene)
 
 
 if __name__ == "__main__":
