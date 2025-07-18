@@ -14,14 +14,7 @@ from isaaclab.actuators.actuator_cfg import ImplicitActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg
 from isaaclab.actuators import IdealPDActuatorCfg
 
-# IMPORTANT NOTE: The user is responsible for converting the provided MJCF files
-# into a USD file using a tool like the OmniKit Asset Converter.
-# The usd_path below is a placeholder and should be pointed to the generated USD.
 O12_HAND_USD_PATH = "/home/minghao/src/robotflow/IsaacLab/assets/o12_tendon/URDF/o12hand_description/urdf/o12_t1_right/o12_t1_right.usd"  # Placeholder path
-
-##
-# Configuration
-##
 
 O12_HAND_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(

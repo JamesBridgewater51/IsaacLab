@@ -8,13 +8,13 @@ from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 # add imports
 from isaaclab.assets import ArticulationCfg, RigidObjectCfg
 from .inhand_manipulation_real_env import InHandManipulationRealEnv, compute_rewards, randomize_rotation
-from isaaclab.sensors import CameraCfg, Camera, TiledCamera, TiledCameraCfg, ContactSensorCfg, ContactSensor
+from isaaclab.sensors import TiledCamera, TiledCameraCfg, ContactSensorCfg, ContactSensor
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, RigidObject
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from isaaclab.envs.common import VecEnvStepReturn
 from isaaclab.sensors.camera.utils import create_pointcloud_from_rgbd
-from isaaclab.utils.math import quat_conjugate, quat_from_angle_axis, quat_mul, sample_uniform, saturate, matrix_from_quat
+from isaaclab.utils.math import quat_conjugate, quat_from_angle_axis, quat_mul, sample_uniform, saturate, matrix_from_quat, quat_from_matrix
 import open3d as o3d
 import numpy as np
 import dataclasses
@@ -35,7 +35,10 @@ import isaaclab.sim as sim_utils
 from isaaclab.utils.noise import NoiseModel
 import os
 import copy
+from einops import einsum
 
+# relative import
+from .inhand_manipulation_env import unscale
 
 
 
@@ -94,6 +97,7 @@ def get_pc_and_color(obs, env_id, camera_numbers, use_camera_view=False, add_noi
         depth = depth_all[env_id]
         intrinsic_matrix = intrinsic_matrices_all[env_id]
         pos_w = pos_w_all[env_id]
+        # print(f"[DEBUG] env_id: {env_id}, pos_w: {pos_w}, quat_w_ros: {quat_w_ros_all[env_id]}")  # DEBUG
         quat_w_ros = quat_w_ros_all[env_id]
 
         # modify some parameters if use_camera_view is True
@@ -102,9 +106,8 @@ def get_pc_and_color(obs, env_id, camera_numbers, use_camera_view=False, add_noi
             quat_w_ros = torch.zeros_like(quat_w_ros)
             quat_w_ros[..., 0] = 1.0
 
-        if add_noise:
+        if add_noise and quat_w_ros is not None:
             quat_w_ros[:] = quat_mul(quat_w_ros[:], camera_rot_noise_now[env_id])
-            # cprint(f"quat_w_ros: {quat_w_ros}", "red")
 
 
         # generate point cloud
@@ -131,8 +134,6 @@ def get_pc_and_color(obs, env_id, camera_numbers, use_camera_view=False, add_noi
         points_all[..., 1] += camera_pos_noise_now[1]
         points_all[..., 2] += camera_pos_noise_now[2]
 
-        # cprint(f"points_all.shape: {points_all.shape}", "cyan")
-
     return points_all, colors_all
 
 pc_vis_debug = o3d.geometry.PointCloud()
@@ -146,6 +147,11 @@ class InHandManipulationRealHandInitPCTactileSingleCamEnv(InHandManipulationReal
         self.camera_crop_max = 1024   # maximum crop number, other cropptions must be smaller than this. 
         self.target_pc_crop_max = 512
 
+        self.main_cam_pos = (0.1, 0.05, 0.8)
+        self.main_cam_rot = (0.21807073, 0.07232954, 0.30639284, 0.92376243)
+        self.sky_cam_pos = (0.1, 0.05, 1.1)
+        self.sky_cam_rot = (-0.70710678, 0, 0, 0.70710678)
+
         # set up configurations to add cameras
         self.camera_config_00 = TiledCameraCfg(
         prim_path="/World/envs/env_.*/Camera01",
@@ -156,9 +162,7 @@ class InHandManipulationRealHandInitPCTactileSingleCamEnv(InHandManipulationReal
         spawn=sim_utils.PinholeCameraCfg(
             focal_length=18.145, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(1e-4, 1e4)
         ),
-        # offset=CameraCfg.OffsetCfg(pos=(0.41655, 0.38761, 1.21457), rot=(0.294, 0.126, 0.381, 0.867), convention="opengl"),
-        offset=CameraCfg.OffsetCfg(pos=(0.31, -0.08, 0.825), rot=(0.2242, 0.1208, 0.2949, 0.9210), convention="opengl"),
-        # offset=CameraCfg.OffsetCfg(pos=(0.31, -0.08, 0.825), rot=(0.37411, 0.20847, 0.34481, 0.83528), convention="opengl"),
+        offset=TiledCameraCfg.OffsetCfg(pos=self.main_cam_pos, rot=self.main_cam_rot, convention="opengl"),
         )
         
 
@@ -170,14 +174,13 @@ class InHandManipulationRealHandInitPCTactileSingleCamEnv(InHandManipulationReal
         spawn=sim_utils.PinholeCameraCfg(
             focal_length=18.145, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(1e-4, 1e4)
         ),
-        # offset=CameraCfg.OffsetCfg(pos=(0.41655, 0.38761, 1.21457 + cfg.height_vis_obj), rot=(0.294, 0.126, 0.381, 0.867), convention="opengl"),
-        offset=CameraCfg.OffsetCfg(pos=(0.31, -0.08, 0.825 + 50), rot=(0.2242, 0.1208, 0.2949, 0.9210), convention="opengl"),
+        offset=TiledCameraCfg.OffsetCfg(pos=self.sky_cam_pos, rot=self.sky_cam_rot, convention="opengl"),
 
         )
 
         # modify the configuration so that the viewer can be set in a closer position
-        cfg.viewer.eye = (0.1, -0.1, 1.1)
-        cfg.viewer.lookat = (-0.3, -0.6, -0.1)
+        cfg.viewer.eye = self.main_cam_pos
+        cfg.viewer.lookat = (0,0,0.5)
 
         # modify this one to make the episode longer
         cfg.episode_length_s = 10000000.0
@@ -186,46 +189,34 @@ class InHandManipulationRealHandInitPCTactileSingleCamEnv(InHandManipulationReal
         # modify to enable tactile sensors
         cfg.robot_cfg.spawn.activate_contact_sensors = True
 
-        # modify the configuration of the simulation env
-
         cfg.success_tolerance = 0.3
-        cprint(f"[Inhand_Mani_Handinit_PC_Tactile_Env]cfg.success_tolerance: {cfg.success_tolerance}", "green")
-        
-
-        # modify to delete noisy model
-
-        # if cfg.action_noise_model is not None:
-        #     cprint(f"cfg.action_noise_model: {cfg.action_noise_model}", "cyan")
-        #     cprint(f"reset the action_noise_model to None", "cyan")
-        #     cfg.action_noise_model = None
-        
-        # if cfg.observation_noise_model is not None:
-        #     cprint(f"cfg.observation_noise_model: {cfg.observation_noise_model}", "cyan")
-        #     cprint(f"reset the observation_noise_model to None", "cyan")
-        #     cfg.observation_noise_model = None
-
         # we should define the "camera_config" before calling the father class
         super().__init__(cfg, render_mode, **kwargs)
         self.goal_pos[:, :] = torch.tensor([-0.2, -0.45, 0.58], device=self.device)
         if cfg.object_name in ["mug_colored"]:
             self.goal_pos[:, :] = torch.tensor([-0.175, -0.4175, 0.55], device=self.device)
-        cprint(f"self.episode_length_s: {self.max_episode_length_s}", "cyan")
-        cprint(f"self.max_episode_length: {self.max_episode_length}", "cyan")
 
+        if cfg.action_noise_model:
+            self._action_noise_model: NoiseModel = cfg.action_noise_model.class_type(
+                cfg.action_noise_model, num_envs=self.num_envs, device=self.device
+            )
+        if cfg.observation_noise_model:
+            self._observation_noise_model: NoiseModel = cfg.observation_noise_model.class_type(
+                cfg.observation_noise_model, num_envs=self.num_envs, device=self.device
+            )
         # target_pc
         object_name = cfg.object_name
         root_dir = cfg.root_dir
         obj_path = os.path.join(root_dir, "assets/shape_variant/thingi10k/colored_obj_stl", f"{object_name}/object_colored.pt")
         self.target_pc = torch.load(obj_path)
         
-
         # do farthest sampling
         self.tmp_pc = o3d.geometry.PointCloud()
-        self.tmp_pc.points = o3d.utility.Vector3dVector(self.target_pc[..., :3].detach().cpu().numpy())
-        self.tmp_pc.colors = o3d.utility.Vector3dVector(self.target_pc[..., 3:].detach().cpu().numpy() * 255)
+        self.tmp_pc.points = o3d.utility.Vector3dVector(self.target_pc[..., :3].numpy(force=True))
+        self.tmp_pc.colors = o3d.utility.Vector3dVector(self.target_pc[..., 3:].numpy(force=True) * 255)
         self.tmp_pc = o3d.geometry.PointCloud.farthest_point_down_sample(self.tmp_pc, self.target_pc_crop_max)
         # N x 6
-        self.target_pc = torch.tensor(np.concatenate([np.asarray(self.tmp_pc.points), np.asarray(self.tmp_pc.colors)], axis=-1)).to(device=self.device)
+        self.target_pc = torch.tensor(np.concatenate([np.asarray(self.tmp_pc.points), np.asarray(self.tmp_pc.colors)], axis=-1)).to(device=self.device, dtype=torch.float32)
         self.cur_target_pc = self.target_pc[None, ...].repeat(self.num_envs, 1, 1)  # (num_envs, num_pts, 6)
 
         if self.cfg.point_cloud_noise_model is not None:
@@ -239,7 +230,6 @@ class InHandManipulationRealHandInitPCTactileSingleCamEnv(InHandManipulationReal
                 self._pc_noise_models.append(self._pc_noise_model)
 
         self.camera_quat = self.scene[f"camera_00"].data.quat_w_ros
-        cprint(f"camera_quat: {self.camera_quat}", "cyan")
         self.camera_pos = self.scene[f"camera_00"].data.pos_w
         self.camera_rot_noise_now = None
         self.camera_pos_noise_now = None
@@ -276,26 +266,24 @@ class InHandManipulationRealHandInitPCTactileSingleCamEnv(InHandManipulationReal
         self.goal_markers.visualize(goal_pos, self.goal_rot)
 
         vis_goal_pos = copy.deepcopy(goal_pos)
-        vis_goal_pos[..., 2] += 50
+        vis_goal_pos[env_ids, 2] += 50
         vis_root_state = torch.cat([vis_goal_pos, self.goal_rot], dim=-1)
-        self.vis_goal_object.write_root_pose_to_sim(root_pose=vis_root_state, env_ids=env_ids)
+        self.vis_goal_object.write_root_pose_to_sim(root_pose=vis_root_state[env_ids], env_ids=env_ids)
 
         self.reset_goal_buf[env_ids] = 0
 
-        # 1. First transform target_pc from object canonicalized pose to world pose.
-        rotation_matrix = matrix_from_quat(self.goal_rot[env_ids].squeeze(0)).to(dtype=self.target_pc.dtype, device=self.device)
-        # NOTE: rotation_matrix is T_cb s.t P_b = T_bc * P_c, so P_c right multipllied by T_bc returns P_b.
-        self.cur_target_pc[..., :3] = torch.matmul(self.target_pc[None, ..., :3], rotation_matrix.permute(0, 2, 1)) # (1,num_pts,3) @ (num_envs, 3, 3) -> (num_envs, num_pts, 3)
+        # 1. First transform target_pc from object pose to world pose.
+        R_bc = matrix_from_quat(self.goal_rot[env_ids]).to(dtype=self.target_pc.dtype, device=self.device)
+        # NOTE: rotation_matrix is T_bc s.t P_b = T_bc * P_c, so P_c right multipllied by T_bc returns P_b.
+        self.cur_target_pc[env_ids, :, :3] = einsum(R_bc, self.target_pc[..., :3], 'num_envs i space_dim, num_pts space_dim -> num_envs num_pts i') # 
+        # self.cur_target_pc[..., :3] = torch.matmul(self.target_pc[None, ..., :3], R_bc.permute(0, 2, 1)) # (1,num_pts,3) @ (num_envs, 3, 3) -> (num_envs, num_pts, 3)
         
         # 2. Then transform the target_pc from world pose to camera pose.
         camera_pos = torch.zeros_like(self.camera_pos)
-        # NOTE: camera pose is R_cb , so use transform_points_inverse.
-        self.cur_target_pc[..., :3] = transform_points_inverse(self.cur_target_pc[..., :3].float(), pos=camera_pos, quat=self.camera_quat).squeeze(0)
+        # NOTE: cam_pos && cam_quat are T_bc, so from world pose to cam pose, we use transform_points_inverse.
+        self.cur_target_pc[env_ids, :, :3] = transform_points_inverse(self.cur_target_pc[env_ids, :, :3], pos=camera_pos[env_ids], quat=self.camera_quat[env_ids])
 
 
-
-    
-    # modify the "set_up_scene" function to add cameras and delete ground plane
     def _setup_scene(self):
         # add hand, in-hand object, and goal object
         self.scene.clone_environments(copy_from_source=False)
@@ -363,20 +351,11 @@ class InHandManipulationRealHandInitPCTactileSingleCamEnv(InHandManipulationReal
 
         return total_reward, goal_env_ids
 
-
-    '''
-    In direct_rl_env.py, we have: self.obs_buf = self._get_observations(), and,
-    return self.obs_buf, self.reward_buf, self.reset_terminated, self.reset_time_outs, self.extras
-    so we need to add "rgba" and "depth" image into the "obs_buf" dict in order to generate point_cloud from it
-    '''
-
     def _get_observations(self) -> dict:
 
         obs_origin = super()._get_observations()
 
         for cam_id in range(self.num_cameras):
-        # get rgba, depth, intrinsic_matrices, pos_w, quat_w_ros from camera sensor
-
             obs_origin[f"rgba_img_0{cam_id}"] = self.scene[f"camera_0{cam_id}"].data.output["rgb"]
             obs_origin[f"depth_img_0{cam_id}"] = self.scene[f"camera_0{cam_id}"].data.output["distance_to_image_plane"]
             obs_origin[f"intrinsic_matrices_0{cam_id}"] = self.scene[f"camera_0{cam_id}"].data.intrinsic_matrices
@@ -390,78 +369,128 @@ class InHandManipulationRealHandInitPCTactileSingleCamEnv(InHandManipulationReal
             obs_sky[f"pos_w_0{cam_id}"] = self.scene[f"camera_sky"].data.pos_w
             obs_sky[f"quat_w_ros_0{cam_id}"] = self.scene[f"camera_sky"].data.quat_w_ros
 
-        # add point_cloud here, will be used in the Imitation learning part. 
-        use_camera_view = True
+        use_camera_view = False
         add_noise = True
-        # use_camera_view = False
-        # cut_dis = 0.975
-        # cut_dis = 0.450
+      
         cut_dis = 0.450
         far_dis = 0.750
+
+        vis_dbg = False
+        if vis_dbg:
+            vis = o3d.visualization.Visualizer()
+            vis.create_window(window_name="observation", width=640, height=640)
+            vis_sky = o3d.visualization.Visualizer()
+            vis_sky.create_window(window_name="sky observation", width=640, height=640)
+            import cv2
+            import matplotlib.pyplot as plt
+
         for env_id in range(self.num_envs):
-            point_cloud_list = []
-            point_cloud_true_list = []
-            points_all, colors_all = get_pc_and_color(obs_origin, env_id, self.num_cameras, use_camera_view, add_noise, self.camera_rot_noise_now, self.camera_pos_noise_now)
-            points_true_all, colors_true_all = get_pc_and_color(obs_origin, env_id, self.num_cameras, use_camera_view, False)
-            # sample by the dist first
-            if use_camera_view:
-                points_dist_all = torch.norm(points_all, dim=-1)
-                points_all = points_all[points_dist_all > cut_dis]
-                colors_all = colors_all[points_dist_all > cut_dis]
-                points_all[..., 2] -= cut_dis
-
-                points_dist_true_all = torch.norm(points_true_all, dim=-1)
-                points_true_all = points_true_all[points_dist_true_all > cut_dis]
-                colors_true_all = colors_true_all[points_dist_true_all > cut_dis]
-                points_true_all[..., 2] -= cut_dis
-
-            # add gaussion noise
+            pc_noisy_list = []
+            pc_clean_list = []
+            # NOTE: returned pts are in world frame when `use_camera_view` set to False.
+            pc_noisy_, colors_noisy = get_pc_and_color(obs_origin, env_id, self.num_cameras, use_camera_view, add_noise, self.camera_rot_noise_now, self.camera_pos_noise_now)
+            pc_clean_, colors_clean = get_pc_and_color(obs_origin, env_id, self.num_cameras, use_camera_view, False)
+        
             if self._pc_noise_models is not None:
-                points_all = self._pc_noise_models[env_id](points_all)
-                points_true_all = self._pc_noise_models[env_id](points_true_all)
+                pc_noisy_ = self._pc_noise_models[env_id](pc_noisy_)
+                pc_clean_ = self._pc_noise_models[env_id](pc_clean_)
             
-            points_true_env = o3d.geometry.PointCloud()
-            points_true_env.points = o3d.utility.Vector3dVector(points_true_all.detach().cpu().numpy())
-            points_true_env.colors = o3d.utility.Vector3dVector(colors_true_all.detach().cpu().numpy())
-            points_true_env = o3d.geometry.PointCloud.farthest_point_down_sample(points_true_env, self.camera_crop_max)
-            combined_points_colors_true = np.concatenate([np.asarray(points_true_env.points), np.asarray(points_true_env.colors)], axis=-1)
-            point_cloud_true_list.append(torch.tensor(combined_points_colors_true))
+            pc_clean_o3d = o3d.geometry.PointCloud()
+            pc_clean_o3d.points = o3d.utility.Vector3dVector(pc_clean_.numpy(force=True))
+            pc_clean_o3d.colors = o3d.utility.Vector3dVector((colors_clean/255).numpy(force=True))
 
+            pc_clean_o3d = o3d.geometry.PointCloud.farthest_point_down_sample(pc_clean_o3d, self.camera_crop_max)
+            pc_clean = np.concatenate([np.asarray(pc_clean_o3d.points), np.asarray(pc_clean_o3d.colors)], axis=-1)
+            pc_clean_list.append(torch.tensor(pc_clean))
     
-            points_env = o3d.geometry.PointCloud()
-            points_env.points = o3d.utility.Vector3dVector(points_all.detach().cpu().numpy())
-            points_env.colors = o3d.utility.Vector3dVector(colors_all.detach().cpu().numpy())
+            pc_noisy_o3d = o3d.geometry.PointCloud()
+            pc_noisy_o3d.points = o3d.utility.Vector3dVector(pc_noisy_.numpy(force=True))
+            pc_noisy_o3d.colors = o3d.utility.Vector3dVector((colors_noisy/255).numpy(force=True))
     
-            points_env = o3d.geometry.PointCloud.farthest_point_down_sample(points_env, self.camera_crop_max)
-            combined_points_colors = np.concatenate([np.asarray(points_env.points), np.asarray(points_env.colors)], axis=-1)
-            point_cloud_list.append(torch.tensor(combined_points_colors))
-            point_sky_list = []
-            points_all_sky, colors_all_sky = get_pc_and_color(obs_sky, env_id, self.num_cameras, use_camera_view, add_noise, self.camera_rot_noise_now, self.camera_pos_noise_now)
-            if not use_camera_view:   # if not , we need alignment
-                points_all_sky[..., 2] -= self.cfg.height_vis_obj
-            
-            if use_camera_view:
-                points_all_sky[..., 2] -= cut_dis
+            pc_noisy_o3d = o3d.geometry.PointCloud.farthest_point_down_sample(pc_noisy_o3d, self.camera_crop_max)
+            pc_noisy = np.concatenate([np.asarray(pc_noisy_o3d.points), np.asarray(pc_noisy_o3d.colors)], axis=-1)
+            pc_noisy_list.append(torch.tensor(pc_noisy))
 
-            if self._pc_noise_model is not None:
-                points_all_sky = self._pc_noise_models[env_id](points_all_sky)
-            points_all_sky_all = torch.cat([points_all, points_all_sky], dim=0)
-            colors_all_sky_all = torch.cat([colors_all, colors_all_sky], dim=0)
-            points_env_sky = o3d.geometry.PointCloud()
-            points_env_sky.points = o3d.utility.Vector3dVector(points_all_sky_all.detach().cpu().numpy())
-            points_env_sky.colors = o3d.utility.Vector3dVector(colors_all_sky_all.detach().cpu().numpy())
-            points_env_sky = o3d.geometry.PointCloud.farthest_point_down_sample(points_env_sky, self.camera_crop_max)
-            combined_points_colors_sky = np.concatenate([np.asarray(points_env_sky.points), np.asarray(points_env_sky.colors)], axis=-1)
-            point_sky_list.append(torch.tensor(combined_points_colors_sky))
+            pc_sky_noisy_list = []
+            # pc_sky_noisy, colors_sky_noisy = get_pc_and_color(obs_sky, env_id, self.num_cameras, use_camera_view, add_noise, self.camera_rot_noise_now, self.camera_pos_noise_now)
+            pc_sky_noisy, colors_sky_noisy = get_pc_and_color(obs_sky, env_id, self.num_cameras, use_camera_view, False)
+            if self._pc_noise_models is not None:
+                pc_sky_noisy = self._pc_noise_models[env_id](pc_sky_noisy)
 
+            # NOTE: this only makes sense when pc_noisy_ and pc_sky_noisy are both in world frame ( use_camera_view=False).
+            # QUESTION: the original impl. combine pc_noisy_ and pc_sky_noisy, what is the motive behind this? (If _pc_noise_models is not None, then pc_noisy_ and pc_sky_noisy would undergone different noise pertubation, and there is not further alignment.)
+            # pc_sky_noisy = torch.cat([pc_noisy_[..., :3], pc_sky_noisy], dim=0)
+            # colors_sky_noisy = torch.cat([colors_noisy, colors_sky_noisy], dim=0)
+            pc_sky_noisy_o3d = o3d.geometry.PointCloud()
+            pc_sky_noisy_o3d.points = o3d.utility.Vector3dVector(pc_sky_noisy.numpy(force=True))
+            pc_sky_noisy_o3d.colors = o3d.utility.Vector3dVector((colors_sky_noisy/255).numpy(force=True))
+            pc_sky_noisy_o3d = o3d.geometry.PointCloud.farthest_point_down_sample(pc_sky_noisy_o3d, self.camera_crop_max)
+            pc_sky_noisy = np.concatenate([np.asarray(pc_sky_noisy_o3d.points), np.asarray(pc_sky_noisy_o3d.colors)], axis=-1)
+            pc_sky_noisy_list.append(torch.tensor(pc_sky_noisy))
 
-        point_cloud_tensor = torch.stack(point_cloud_list, dim=0)
+            if vis_dbg:
+                vis.clear_geometries()
+                vis_sky.clear_geometries()
+                # ISSUE: `add_geometry` call must be called before `get_view_control().convert_from_pinhole_camera_parameters()`
+                # otherwise, the camera view would be not set correctly. Inspecting the open3d source code, the `convert_from_pinhole_camera_parameters` sets _eye, _front, _up, _lookat, _zoom of cam view context.
+                # The `add_geometry` call belongs to glsl::PointCloudRenderer under `cpp/open3d/visualization/shader/GeometryRenderer.cpp` path. But need time to dig in how this glsl::PointCloudRenderer ptr construction would affect rendering process.
+                vis.add_geometry(pc_clean_o3d)
+                # vis.add_geometry(pc_noisy_o3d)
+                vis_sky.add_geometry(pc_sky_noisy_o3d)
+
+                cam_param = o3d.camera.PinholeCameraParameters()
+                cam_intr_param = o3d.camera.PinholeCameraIntrinsic()
+                cam_intr_param.intrinsic_matrix = obs_origin[f"intrinsic_matrices_0{0}"][env_id].numpy(force=True) # subscript 0 means cam in env_0.
+                cam_param.intrinsic = cam_intr_param
+                T_bc = np.eye(4)
+                T_bc[:3, :3] = matrix_from_quat(obs_origin[f"quat_w_ros_0{0}"][env_id]).numpy(force=True)
+                T_bc[:3, 3] = obs_origin[f"pos_w_0{0}"][env_id].numpy(force=True)
+                T_cb = np.linalg.inv(T_bc)
+                cam_param.extrinsic = T_cb
+                view_ctl = vis.get_view_control()
+                view_ctl.convert_from_pinhole_camera_parameters(cam_param, allow_arbitrary=True) # When allow_arbitrary is True, camera intrinsic's height and width is able to not match created window.
+
+                cam_param = o3d.camera.PinholeCameraParameters()
+                cam_intr_param = o3d.camera.PinholeCameraIntrinsic()
+                cam_intr_param.intrinsic_matrix = obs_sky[f"intrinsic_matrices_0{0}"][env_id].numpy(force=True) # subscript 0 means cam in env_0.
+                cam_param.intrinsic = cam_intr_param
+                T_bc = np.eye(4)
+                T_bc[:3, :3] = matrix_from_quat(obs_sky[f"quat_w_ros_0{0}"][env_id]).numpy(force=True)
+                T_bc[:3, 3] = obs_sky[f"pos_w_0{0}"][env_id].numpy(force=True)
+                T_cb = np.linalg.inv(T_bc)
+                cam_param.extrinsic = T_cb
+                view_ctl_sky = vis_sky.get_view_control()
+                view_ctl_sky.convert_from_pinhole_camera_parameters(cam_param, allow_arbitrary=True)
+                # cam_params = vis.get_view_control().convert_to_pinhole_camera_parameters()
+
+                vis.poll_events()
+                vis.update_renderer()
+                vis_sky.poll_events()
+                vis_sky.update_renderer()
+
+                fig, axes = plt.subplots(nrows=2, ncols=2, figsize=(8, 8))
+                axes = axes.flatten()
+                imgs = [obs_origin[f"rgba_img_00"][env_id].numpy(force=True),
+                        obs_origin[f"depth_img_00"][env_id].numpy(force=True),
+                        obs_sky[f"rgba_img_00"][env_id].numpy(force=True),
+                        obs_sky[f"depth_img_00"][env_id].numpy(force=True)]
+                for i, img in enumerate(imgs):
+                    axes[i].imshow(img)
+                    axes[i].axis('off')
+                plt.tight_layout()
+                plt.show(block=False)
+
+        if vis_dbg:
+            vis.destroy_window()
+            vis_sky.destroy_window()
+
+        point_cloud_tensor = torch.stack(pc_noisy_list, dim=0)
         obs_origin["point_cloud"] = point_cloud_tensor
 
-        point_cloud_tensor_sky = torch.stack(point_sky_list, dim=0)
+        point_cloud_tensor_sky = torch.stack(pc_sky_noisy_list, dim=0)
         obs_origin["point_cloud_sky"] = point_cloud_tensor_sky
 
-        point_cloud_tensor_true = torch.stack(point_cloud_true_list, dim=0)
+        point_cloud_tensor_true = torch.stack(pc_clean_list, dim=0)
         obs_origin["point_cloud_tensor_true"] = point_cloud_tensor_true
         # check the output of the contact sensors
         contact_forces:ContactSensor = self.scene["contact_forces"]
@@ -469,16 +498,17 @@ class InHandManipulationRealHandInitPCTactileSingleCamEnv(InHandManipulationReal
 
         obs_origin["contact_forces"] = contact_data
 
-        full_obs = self.compute_full_observations()
-        obs_agent_pos = full_obs[..., :24]
-        obs_origin["agent_pos_gt"] = obs_agent_pos
+        # FIXME: temporarily disable "agent_pos_gt" and "agent_pos" data recording since they are not used in the gen_expert_demo procedure. And _observation_noise_model would have its _num_components attribute cached
+        # So it cannot be called on both 'openai' style-obs and 'full' style-obs sequentially.
 
-        if self.cfg.observation_noise_model:
-            full_obs = self._observation_noise_model(full_obs)
-        obs_agent_pos = full_obs[..., :24]
-        obs_origin["agent_pos"] = obs_agent_pos
+        # obs_agent_pos = unscale(self.hand_dof_pos, self.hand_dof_lower_limits, self.hand_dof_upper_limits)
+        # obs_origin["agent_pos_gt"] = obs_agent_pos
 
-        # add goal_rot and goal_pc
+        # if self.cfg.observation_noise_model:
+        #     full_obs = self._observation_noise_model(full_obs)
+        # obs_agent_pos = full_obs[..., :24]
+        # obs_origin["agent_pos"] = obs_agent_pos
+
         goal_rot = self.goal_rot
         obs_origin["goal_rot"] = goal_rot
 
@@ -529,7 +559,8 @@ class InHandManipulationRealHandInitPCTactileSingleCamEnv(InHandManipulationReal
         if self.cfg.observation_noise_model:
             self._observation_noise_model.reset(env_ids)
         if self.cfg.point_cloud_noise_model:
-            self._pc_noise_model.reset(env_ids)
+            for env_id in env_ids:
+                self._pc_noise_models[env_id].reset()
 
         # reset the episode length buffer
         self.episode_length_buf[env_ids] = 0
@@ -573,7 +604,6 @@ class InHandManipulationRealHandInitPCTactileSingleCamEnv(InHandManipulationReal
         if isinstance(self.cfg, ShadowHandRealHandInitPCTactileSingalGoalEnvCfg):
             object_default_state[:, 3:7] = torch.zeros_like(object_default_state[:, 3:7])
             object_default_state[:, 3] = 1.0
-            # cprint(f"object_default_state[:, 3:7]: {object_default_state[:, 3:7]}", "cyan")
 
         object_default_state[:, 7:] = torch.zeros_like(self.object.data.default_root_state[env_ids, 7:])
         
@@ -649,7 +679,6 @@ class InHandManipulationRealHandInitPCTactileSingleCamEnv(InHandManipulationReal
 
         # process actions
         self._pre_physics_step(action)
-        # cprint(f"self.action: {self.actions}")
 
         # check if we need to do rendering within the physics loop
         # note: checked here once to avoid multiple checks within the loop

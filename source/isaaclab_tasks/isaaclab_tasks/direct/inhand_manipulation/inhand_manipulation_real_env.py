@@ -20,8 +20,6 @@ from isaaclab.utils.math import quat_conjugate, quat_from_angle_axis, quat_mul, 
 from isaaclab_tasks.direct.shadow_hand import ShadowHandRealEnvCfg, ShadowHandRealHandInitEnvCfg
 
 from termcolor import cprint
-import time
-import math
 
 class InHandManipulationRealEnv(DirectRLEnv):
     cfg: ShadowHandRealEnvCfg | ShadowHandRealHandInitEnvCfg
@@ -76,9 +74,6 @@ class InHandManipulationRealEnv(DirectRLEnv):
         joint_pos_limits = self.hand.root_physx_view.get_dof_limits().to(self.device)
         self.hand_dof_lower_limits = joint_pos_limits[..., 0]
         self.hand_dof_upper_limits = joint_pos_limits[..., 1]
-        cprint(f"self.hand_dof_lower_limits: {self.hand_dof_lower_limits}", "yellow")
-        cprint(f"self.hand_dof_upper_limits: {self.hand_dof_upper_limits}", "yellow")
-        cprint(f"self.joint_names: {self.hand.joint_names}", "cyan")
 
         # track goal resets
         self.reset_goal_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -102,8 +97,6 @@ class InHandManipulationRealEnv(DirectRLEnv):
         self.x_unit_tensor = torch.tensor([1, 0, 0], dtype=torch.float, device=self.device).repeat((self.num_envs, 1))
         self.y_unit_tensor = torch.tensor([0, 1, 0], dtype=torch.float, device=self.device).repeat((self.num_envs, 1))
         self.z_unit_tensor = torch.tensor([0, 0, 1], dtype=torch.float, device=self.device).repeat((self.num_envs, 1))
-
-        cprint(f"[InHandManipulationRealEnv] self.cfg.decimation: {self.cfg.decimation}", "green")
 
         # specific traj_number is not available
 
@@ -288,7 +281,6 @@ class InHandManipulationRealEnv(DirectRLEnv):
 
     ''' reset_idx: reset the [env, the obj, the target_obj], reset_target_pose: only reset the target_obj. '''
     def _reset_idx(self, env_ids: Sequence[int] | None):
-        # cprint(f"[reset_idx] goal_env_ids: {env_ids}", "light_yellow")
         if env_ids is None:
             env_ids = self.hand._ALL_INDICES
         # resets articulation and rigid body attributes
@@ -344,7 +336,6 @@ class InHandManipulationRealEnv(DirectRLEnv):
         
 
     def _reset_target_pose(self, env_ids):
-        # cprint(f"[reset_target_pose] goal_env_ids: {env_ids}", "light_yellow")
         
         # reset goal rotation
         rand_floats = sample_uniform(-1.0, 1.0, (len(env_ids), 2), device=self.device)

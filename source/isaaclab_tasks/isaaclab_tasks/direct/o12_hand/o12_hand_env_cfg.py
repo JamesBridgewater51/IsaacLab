@@ -25,12 +25,7 @@ from ..shadow_hand.shadow_hand_env_cfg import EventCfg, OBJ_ATTR_DICT
 from isaaclab.sensors import ContactSensorCfg
 import os
 
-# Note: The EventCfg and OBJ_ATTR_DICT can be copied directly from shadow_hand_env_cfg.py
-# as they are generic and not specific to the hand model itself.
-# For brevity, I will assume they are present and just define the main EnvCfgs.
 
-# (Assuming EventCfg and OBJ_ATTR_DICT are defined here as in the original file)
-# ...
 
 @configclass
 class O12HandOpenAIEnvCfg(DirectRLEnvCfg):
@@ -55,7 +50,7 @@ class O12HandOpenAIEnvCfg(DirectRLEnvCfg):
     )
 
     # -- Scene settings
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=32, env_spacing=0.75, replicate_physics=True)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=64, env_spacing=0.75, replicate_physics=True)
 
     # -- Robot settings
     robot_cfg: ArticulationCfg = O12_HAND_CFG.replace(prim_path="/World/envs/env_.*/Robot")
