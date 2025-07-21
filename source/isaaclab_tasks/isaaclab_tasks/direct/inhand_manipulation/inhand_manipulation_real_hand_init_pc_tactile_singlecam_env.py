@@ -42,6 +42,7 @@ from .inhand_manipulation_env import unscale
 
 
 
+# region
 def transform_points_inverse(
     points: torch.Tensor, pos: torch.Tensor, quat: torch.Tensor
 ) -> torch.Tensor:
@@ -79,11 +80,13 @@ def transform_points_inverse(
     transformed_points = torch.matmul(rot_mat_inv, translated_points.transpose(-2, -1))
     
     return transformed_points.transpose(-2, -1)
+# endregion
 
 
 
 
 
+# region
 def get_pc_and_color(obs, env_id, camera_numbers, use_camera_view=False, add_noise=False, camera_rot_noise_now=None, camera_pos_noise_now = None):
     points_all = []
     colors_all = []
@@ -135,6 +138,7 @@ def get_pc_and_color(obs, env_id, camera_numbers, use_camera_view=False, add_noi
         points_all[..., 2] += camera_pos_noise_now[2]
 
     return points_all, colors_all
+# endregion
 
 pc_vis_debug = o3d.geometry.PointCloud()
 
@@ -179,8 +183,8 @@ class InHandManipulationRealHandInitPCTactileSingleCamEnv(InHandManipulationReal
         )
 
         # modify the configuration so that the viewer can be set in a closer position
-        cfg.viewer.eye = self.main_cam_pos
-        cfg.viewer.lookat = (0,0,0.5)
+        # cfg.viewer.eye = self.main_cam_pos
+        # cfg.viewer.lookat = (0,0,0.5)
 
         # modify this one to make the episode longer
         cfg.episode_length_s = 10000000.0
@@ -574,7 +578,7 @@ class InHandManipulationRealHandInitPCTactileSingleCamEnv(InHandManipulationReal
         object_default_state = self.object.data.default_root_state.clone()[env_ids]
         '''Default root state ``[pos, quat, lin_vel, ang_vel]`` in local environment frame '''
 
-        pos_noise = sample_uniform(-1.0, 1.0, (len(env_ids), 3), device=self.device)
+        pos_noise = sample_uniform(-0.05, 0.05, (len(env_ids), 3), device=self.device)
         object_default_state[:, 0:3] = (
             object_default_state[:, 0:3] + self.cfg.reset_position_noise * pos_noise + self.scene.env_origins[env_ids]
         )
