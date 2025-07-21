@@ -50,27 +50,27 @@ class O12HandOpenAIEnvCfg(DirectRLEnvCfg):
     )
 
     # -- Scene settings
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=64, env_spacing=0.75, replicate_physics=True)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=32, env_spacing=0.75, replicate_physics=True)
 
     # -- Robot settings
     robot_cfg: ArticulationCfg = O12_HAND_CFG.replace(prim_path="/World/envs/env_.*/Robot")
     
     # List of directly actuated joints, derived from the <actuator> section of the MJCF
     actuated_joint_names = [
-        "thumb_roll_joint", "thumb_abad_joint", "thumb_MCP_joint", "thumb_PIP_joint",
-        "index_abad_joint", "index_MCP_joint", "index_PIP_joint",
-        "middle_abad_joint", "middle_MCP_joint", "middle_PIP_joint",
-        "ring_MCP_joint",
-        "pinky_MCP_joint",
+        "R_thumb_roll_joint", "R_thumb_abad_joint", "R_thumb_mcp_joint", "R_thumb_pip_joint",
+        "R_index_abad_joint", "R_index_mcp_joint", "R_index_pip_joint",
+        "R_middle_abad_joint", "R_middle_mcp_joint", "R_middle_pip_joint",
+        "R_ring_mcp_joint",
+        "R_pinky_mcp_joint",
     ]
     
     # List of fingertip bodies for observation and reward calculation
     fingertip_body_names = [
-        "thumb_distal",
-        "index_distal",
-        "middle_distal",
-        "ring_distal",
-        "pinky_distal",
+        "R_thumb_distal",
+        "R_index_distal",
+        "R_middle_distal",
+        "R_ring_distal",
+        "R_pinky_distal",
     ]
 
 
@@ -149,7 +149,7 @@ class O12HandOpenAIEnvCfg(DirectRLEnvCfg):
             scale=_object_scale,
             visual_material=visual_material,  
         ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, -0.07, 0.53), rot=(1.0, 0.0, 0.0, 0.0)),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.00, -0.11, 0.505), rot=(1.0, 0.0, 0.0, 0.0)),
     )
     
     # -- Goal marker settings
@@ -252,28 +252,28 @@ class O12HandSim2RealEnvCfg(O12HandOpenAIEnvCfg):
     
     joint_couplings = [
         {
-            "actuated": "thumb_PIP_joint",
-            "mimicked": ["thumb_DIP_joint"],
+            "actuated": "R_thumb_pip_joint",
+            "mimicked": ["R_thumb_dip_joint"],
             "ratios": [0.84],
         },
         {
-            "actuated": "index_PIP_joint",
-            "mimicked": ["index_DIP_joint"],
+            "actuated": "R_index_pip_joint",
+            "mimicked": ["R_index_dip_joint"],
             "ratios": [1.144],
         },
         {
-            "actuated": "middle_PIP_joint",
-            "mimicked": ["middle_DIP_joint"],
+            "actuated": "R_middle_pip_joint",
+            "mimicked": ["R_middle_dip_joint"],
             "ratios": [1.144],
         },
         {
-            "actuated": "ring_MCP_joint",
-            "mimicked": ["ring_PIP_joint", "ring_DIP_joint"],
+            "actuated": "R_ring_mcp_joint",
+            "mimicked": ["R_ring_pip_joint", "R_ring_dip_joint"],
             "ratios": [1.066, 1.066], # Approximation based on analysis
         },
         {
-            "actuated": "pinky_MCP_joint",
-            "mimicked": ["pinky_PIP_Joint", "pinky_DIP_joint"],
+            "actuated": "R_pinky_mcp_joint",
+            "mimicked": ["R_pinky_pip_joint", "R_pinky_dip_joint"],
             "ratios": [1.066, 1.066], # Approximation based on analysis
         },
     ]
