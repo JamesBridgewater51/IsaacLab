@@ -150,12 +150,25 @@ class InHandManipulationRealHandInitPCTactileSingleCamEnv(InHandManipulationReal
         self.num_cameras = 1
         self.camera_crop_max = 1024   # maximum crop number, other cropptions must be smaller than this. 
         self.target_pc_crop_max = 512
+        self.include_sky_camera = False
 
         self.main_cam_pos = (0.1, 0.05, 0.8)
         self.main_cam_rot = (0.21807073, 0.07232954, 0.30639284, 0.92376243)
-        self.sky_cam_pos = (0.1, 0.05, 1.1)
-        self.sky_cam_rot = (-0.70710678, 0, 0, 0.70710678)
+        if self.include_sky_camera:
+            self.sky_cam_pos = (0.1, 0.05, 1.1)
+            self.sky_cam_rot = (-0.70710678, 0, 0, 0.70710678)
 
+            self.sky_camera_cfg = TiledCameraCfg(
+            prim_path="/World/envs/env_.*/SkyCamera",
+            height=640,
+            width=640,
+            data_types=["rgb", "distance_to_image_plane"],
+            spawn=sim_utils.PinholeCameraCfg(
+                focal_length=18.145, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(1e-4, 1e4)
+            ),
+            offset=TiledCameraCfg.OffsetCfg(pos=self.sky_cam_pos, rot=self.sky_cam_rot, convention="opengl"),
+
+        )
         # set up configurations to add cameras
         self.camera_config_00 = TiledCameraCfg(
         prim_path="/World/envs/env_.*/Camera01",
@@ -168,19 +181,7 @@ class InHandManipulationRealHandInitPCTactileSingleCamEnv(InHandManipulationReal
         ),
         offset=TiledCameraCfg.OffsetCfg(pos=self.main_cam_pos, rot=self.main_cam_rot, convention="opengl"),
         )
-        
-
-        self.sky_camera_cfg = TiledCameraCfg(
-        prim_path="/World/envs/env_.*/SkyCamera",
-        height=640,
-        width=640,
-        data_types=["rgb", "distance_to_image_plane"],
-        spawn=sim_utils.PinholeCameraCfg(
-            focal_length=18.145, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(1e-4, 1e4)
-        ),
-        offset=TiledCameraCfg.OffsetCfg(pos=self.sky_cam_pos, rot=self.sky_cam_rot, convention="opengl"),
-
-        )
+ 
 
         # modify the configuration so that the viewer can be set in a closer position
         # cfg.viewer.eye = self.main_cam_pos
@@ -296,14 +297,16 @@ class InHandManipulationRealHandInitPCTactileSingleCamEnv(InHandManipulationReal
 
         self.vis_goal_object = RigidObject(dataclasses.replace(self.cfg.object_cfg))
         self.camera_00 = TiledCamera(self.camera_config_00)
-        self.camera_sky = TiledCamera(self.sky_camera_cfg)
+        if self.include_sky_camera:
+            self.camera_sky = TiledCamera(self.sky_camera_cfg)
 
         self.contact_forces = ContactSensor(self.cfg.contact_forces_cfg)
 
         self.scene.articulations["robot"] = self.hand
         self.scene.rigid_objects["object"] = self.object
         self.scene.sensors["camera_00"] = self.camera_00
-        self.scene.sensors["camera_sky"] = self.camera_sky
+        if self.include_sky_camera:
+            self.scene.sensors["camera_sky"] = self.camera_sky
         self.scene.rigid_objects["vis_goal_obj"] = self.vis_goal_object
         self.scene.sensors["contact_forces"] = self.contact_forces
 
@@ -358,6 +361,7 @@ class InHandManipulationRealHandInitPCTactileSingleCamEnv(InHandManipulationReal
     def _get_observations(self) -> dict:
 
         obs_origin = super()._get_observations()
+        include_sky_pc_noisy = self.include_sky_camera
 
         for cam_id in range(self.num_cameras):
             obs_origin[f"rgba_img_0{cam_id}"] = self.scene[f"camera_0{cam_id}"].data.output["rgb"]
@@ -366,12 +370,13 @@ class InHandManipulationRealHandInitPCTactileSingleCamEnv(InHandManipulationReal
             obs_origin[f"pos_w_0{cam_id}"] = self.scene[f"camera_0{cam_id}"].data.pos_w
             obs_origin[f"quat_w_ros_0{cam_id}"] = self.scene[f"camera_0{cam_id}"].data.quat_w_ros
 
-            obs_sky = dict()
-            obs_sky[f"rgba_img_0{cam_id}"] = self.scene[f"camera_sky"].data.output["rgb"]
-            obs_sky[f"depth_img_0{cam_id}"] = self.scene[f"camera_sky"].data.output["distance_to_image_plane"]
-            obs_sky[f"intrinsic_matrices_0{cam_id}"] = self.scene[f"camera_sky"].data.intrinsic_matrices
-            obs_sky[f"pos_w_0{cam_id}"] = self.scene[f"camera_sky"].data.pos_w
-            obs_sky[f"quat_w_ros_0{cam_id}"] = self.scene[f"camera_sky"].data.quat_w_ros
+            if include_sky_pc_noisy:
+                obs_sky = dict()
+                obs_sky[f"rgba_img_0{cam_id}"] = self.scene[f"camera_sky"].data.output["rgb"]
+                obs_sky[f"depth_img_0{cam_id}"] = self.scene[f"camera_sky"].data.output["distance_to_image_plane"]
+                obs_sky[f"intrinsic_matrices_0{cam_id}"] = self.scene[f"camera_sky"].data.intrinsic_matrices
+                obs_sky[f"pos_w_0{cam_id}"] = self.scene[f"camera_sky"].data.pos_w
+                obs_sky[f"quat_w_ros_0{cam_id}"] = self.scene[f"camera_sky"].data.quat_w_ros
 
         use_camera_view = False
         add_noise = True
@@ -380,7 +385,6 @@ class InHandManipulationRealHandInitPCTactileSingleCamEnv(InHandManipulationReal
         far_dis = 0.750
 
         vis_dbg = False
-        include_sky_pc_noisy = False
 
         if vis_dbg:
             vis = o3d.visualization.Visualizer()
@@ -397,7 +401,8 @@ class InHandManipulationRealHandInitPCTactileSingleCamEnv(InHandManipulationReal
             # NOTE: returned pts are in world frame when `use_camera_view` set to False.
             pc_noisy_, colors_noisy = get_pc_and_color(obs_origin, env_id, self.num_cameras, use_camera_view, add_noise, self.camera_rot_noise_now, self.camera_pos_noise_now)
             pc_clean_, colors_clean = get_pc_and_color(obs_origin, env_id, self.num_cameras, use_camera_view, False)
-        
+            cprint(f"pc_clean.shape: {pc_clean_.shape}", "green", attrs=["bold"])
+
             if self._pc_noise_models is not None:
                 pc_noisy_ = self._pc_noise_models[env_id](pc_noisy_)
                 pc_clean_ = self._pc_noise_models[env_id](pc_clean_)
@@ -503,7 +508,8 @@ class InHandManipulationRealHandInitPCTactileSingleCamEnv(InHandManipulationReal
 
         if vis_dbg:
             vis.destroy_window()
-            vis_sky.destroy_window()
+            if include_sky_pc_noisy:
+                vis_sky.destroy_window()
 
         point_cloud_tensor = torch.stack(pc_noisy_list, dim=0)
         obs_origin["point_cloud"] = point_cloud_tensor
