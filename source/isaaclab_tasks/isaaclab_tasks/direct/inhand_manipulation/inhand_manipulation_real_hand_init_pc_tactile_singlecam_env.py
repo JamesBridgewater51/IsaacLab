@@ -380,11 +380,14 @@ class InHandManipulationRealHandInitPCTactileSingleCamEnv(InHandManipulationReal
         far_dis = 0.750
 
         vis_dbg = False
+        include_sky_pc_noisy = False
+
         if vis_dbg:
             vis = o3d.visualization.Visualizer()
             vis.create_window(window_name="observation", width=640, height=640)
-            vis_sky = o3d.visualization.Visualizer()
-            vis_sky.create_window(window_name="sky observation", width=640, height=640)
+            if include_sky_pc_noisy:
+                vis_sky = o3d.visualization.Visualizer()
+                vis_sky.create_window(window_name="sky observation", width=640, height=640)
             import cv2
             import matplotlib.pyplot as plt
 
@@ -415,32 +418,35 @@ class InHandManipulationRealHandInitPCTactileSingleCamEnv(InHandManipulationReal
             pc_noisy = np.concatenate([np.asarray(pc_noisy_o3d.points), np.asarray(pc_noisy_o3d.colors)], axis=-1)
             pc_noisy_list.append(torch.tensor(pc_noisy))
 
-            pc_sky_noisy_list = []
-            # pc_sky_noisy, colors_sky_noisy = get_pc_and_color(obs_sky, env_id, self.num_cameras, use_camera_view, add_noise, self.camera_rot_noise_now, self.camera_pos_noise_now)
-            pc_sky_noisy, colors_sky_noisy = get_pc_and_color(obs_sky, env_id, self.num_cameras, use_camera_view, False)
-            if self._pc_noise_models is not None:
-                pc_sky_noisy = self._pc_noise_models[env_id](pc_sky_noisy)
+            if include_sky_pc_noisy:
+                pc_sky_noisy_list = []
+                # pc_sky_noisy, colors_sky_noisy = get_pc_and_color(obs_sky, env_id, self.num_cameras, use_camera_view, add_noise, self.camera_rot_noise_now, self.camera_pos_noise_now)
+                pc_sky_noisy, colors_sky_noisy = get_pc_and_color(obs_sky, env_id, self.num_cameras, use_camera_view, False)
+                if self._pc_noise_models is not None:
+                    pc_sky_noisy = self._pc_noise_models[env_id](pc_sky_noisy)
 
-            # NOTE: this only makes sense when pc_noisy_ and pc_sky_noisy are both in world frame ( use_camera_view=False).
-            # QUESTION: the original impl. combine pc_noisy_ and pc_sky_noisy, what is the motive behind this? (If _pc_noise_models is not None, then pc_noisy_ and pc_sky_noisy would undergone different noise pertubation, and there is not further alignment.)
-            # pc_sky_noisy = torch.cat([pc_noisy_[..., :3], pc_sky_noisy], dim=0)
-            # colors_sky_noisy = torch.cat([colors_noisy, colors_sky_noisy], dim=0)
-            pc_sky_noisy_o3d = o3d.geometry.PointCloud()
-            pc_sky_noisy_o3d.points = o3d.utility.Vector3dVector(pc_sky_noisy.numpy(force=True))
-            pc_sky_noisy_o3d.colors = o3d.utility.Vector3dVector((colors_sky_noisy/255).numpy(force=True))
-            pc_sky_noisy_o3d = o3d.geometry.PointCloud.farthest_point_down_sample(pc_sky_noisy_o3d, self.camera_crop_max)
-            pc_sky_noisy = np.concatenate([np.asarray(pc_sky_noisy_o3d.points), np.asarray(pc_sky_noisy_o3d.colors)], axis=-1)
-            pc_sky_noisy_list.append(torch.tensor(pc_sky_noisy))
+                # NOTE: this only makes sense when pc_noisy_ and pc_sky_noisy are both in world frame ( use_camera_view=False).
+                # QUESTION: the original impl. combine pc_noisy_ and pc_sky_noisy, what is the motive behind this? (If _pc_noise_models is not None, then pc_noisy_ and pc_sky_noisy would undergone different noise pertubation, and there is not further alignment.)
+                # pc_sky_noisy = torch.cat([pc_noisy_[..., :3], pc_sky_noisy], dim=0)
+                # colors_sky_noisy = torch.cat([colors_noisy, colors_sky_noisy], dim=0)
+                pc_sky_noisy_o3d = o3d.geometry.PointCloud()
+                pc_sky_noisy_o3d.points = o3d.utility.Vector3dVector(pc_sky_noisy.numpy(force=True))
+                pc_sky_noisy_o3d.colors = o3d.utility.Vector3dVector((colors_sky_noisy/255).numpy(force=True))
+                pc_sky_noisy_o3d = o3d.geometry.PointCloud.farthest_point_down_sample(pc_sky_noisy_o3d, self.camera_crop_max)
+                pc_sky_noisy = np.concatenate([np.asarray(pc_sky_noisy_o3d.points), np.asarray(pc_sky_noisy_o3d.colors)], axis=-1)
+                pc_sky_noisy_list.append(torch.tensor(pc_sky_noisy))
 
             if vis_dbg:
                 vis.clear_geometries()
-                vis_sky.clear_geometries()
+                if include_sky_pc_noisy:
+                    vis_sky.clear_geometries()
                 # ISSUE: `add_geometry` call must be called before `get_view_control().convert_from_pinhole_camera_parameters()`
                 # otherwise, the camera view would be not set correctly. Inspecting the open3d source code, the `convert_from_pinhole_camera_parameters` sets _eye, _front, _up, _lookat, _zoom of cam view context.
                 # The `add_geometry` call belongs to glsl::PointCloudRenderer under `cpp/open3d/visualization/shader/GeometryRenderer.cpp` path. But need time to dig in how this glsl::PointCloudRenderer ptr construction would affect rendering process.
                 vis.add_geometry(pc_clean_o3d)
                 # vis.add_geometry(pc_noisy_o3d)
-                vis_sky.add_geometry(pc_sky_noisy_o3d)
+                if include_sky_pc_noisy:
+                    vis_sky.add_geometry(pc_sky_noisy_o3d)
 
                 cam_param = o3d.camera.PinholeCameraParameters()
                 cam_intr_param = o3d.camera.PinholeCameraIntrinsic()
@@ -454,33 +460,44 @@ class InHandManipulationRealHandInitPCTactileSingleCamEnv(InHandManipulationReal
                 view_ctl = vis.get_view_control()
                 view_ctl.convert_from_pinhole_camera_parameters(cam_param, allow_arbitrary=True) # When allow_arbitrary is True, camera intrinsic's height and width is able to not match created window.
 
-                cam_param = o3d.camera.PinholeCameraParameters()
-                cam_intr_param = o3d.camera.PinholeCameraIntrinsic()
-                cam_intr_param.intrinsic_matrix = obs_sky[f"intrinsic_matrices_0{0}"][env_id].numpy(force=True) # subscript 0 means cam in env_0.
-                cam_param.intrinsic = cam_intr_param
-                T_bc = np.eye(4)
-                T_bc[:3, :3] = matrix_from_quat(obs_sky[f"quat_w_ros_0{0}"][env_id]).numpy(force=True)
-                T_bc[:3, 3] = obs_sky[f"pos_w_0{0}"][env_id].numpy(force=True)
-                T_cb = np.linalg.inv(T_bc)
-                cam_param.extrinsic = T_cb
-                view_ctl_sky = vis_sky.get_view_control()
-                view_ctl_sky.convert_from_pinhole_camera_parameters(cam_param, allow_arbitrary=True)
-                # cam_params = vis.get_view_control().convert_to_pinhole_camera_parameters()
+                if include_sky_pc_noisy:
+                    cam_param = o3d.camera.PinholeCameraParameters()
+                    cam_intr_param = o3d.camera.PinholeCameraIntrinsic()
+                    cam_intr_param.intrinsic_matrix = obs_sky[f"intrinsic_matrices_0{0}"][env_id].numpy(force=True) # subscript 0 means cam in env_0.
+                    cam_param.intrinsic = cam_intr_param
+                    T_bc = np.eye(4)
+                    T_bc[:3, :3] = matrix_from_quat(obs_sky[f"quat_w_ros_0{0}"][env_id]).numpy(force=True)
+                    T_bc[:3, 3] = obs_sky[f"pos_w_0{0}"][env_id].numpy(force=True)
+                    T_cb = np.linalg.inv(T_bc)
+                    cam_param.extrinsic = T_cb
+                    view_ctl_sky = vis_sky.get_view_control()
+                    view_ctl_sky.convert_from_pinhole_camera_parameters(cam_param, allow_arbitrary=True)
+                    # cam_params = vis.get_view_control().convert_to_pinhole_camera_parameters()
 
                 vis.poll_events()
                 vis.update_renderer()
-                vis_sky.poll_events()
-                vis_sky.update_renderer()
 
-                fig, axes = plt.subplots(nrows=2, ncols=2, figsize=(8, 8))
-                axes = axes.flatten()
-                imgs = [obs_origin[f"rgba_img_00"][env_id].numpy(force=True),
-                        obs_origin[f"depth_img_00"][env_id].numpy(force=True),
-                        obs_sky[f"rgba_img_00"][env_id].numpy(force=True),
-                        obs_sky[f"depth_img_00"][env_id].numpy(force=True)]
-                for i, img in enumerate(imgs):
-                    axes[i].imshow(img)
-                    axes[i].axis('off')
+                if include_sky_pc_noisy:
+                    vis_sky.poll_events()
+                    vis_sky.update_renderer()
+
+                if include_sky_pc_noisy:
+                    fig, axes = plt.subplots(nrows=2, ncols=2, figsize=(8, 8))
+                    axes = axes.flatten()
+                    imgs = [obs_origin[f"rgba_img_00"][env_id].numpy(force=True),
+                            obs_origin[f"depth_img_00"][env_id].numpy(force=True),
+                            obs_sky[f"rgba_img_00"][env_id].numpy(force=True),
+                            obs_sky[f"depth_img_00"][env_id].numpy(force=True)]
+                    for i, img in enumerate(imgs):
+                        axes[i].imshow(img)
+                        axes[i].axis('off')
+                else:
+                    fig, axes = plt.subplots(nrows=1, ncols=2, figsize=(8, 4))
+                    imgs = [obs_origin[f"rgba_img_00"][env_id].numpy(force=True),
+                            obs_origin[f"depth_img_00"][env_id].numpy(force=True)]
+                    for i, img in enumerate(imgs):
+                        axes[i].imshow(img)
+                        axes[i].axis('off')
                 plt.tight_layout()
                 plt.show(block=False)
 
@@ -491,8 +508,9 @@ class InHandManipulationRealHandInitPCTactileSingleCamEnv(InHandManipulationReal
         point_cloud_tensor = torch.stack(pc_noisy_list, dim=0)
         obs_origin["point_cloud"] = point_cloud_tensor
 
-        point_cloud_tensor_sky = torch.stack(pc_sky_noisy_list, dim=0)
-        obs_origin["point_cloud_sky"] = point_cloud_tensor_sky
+        if include_sky_pc_noisy:
+            point_cloud_tensor_sky = torch.stack(pc_sky_noisy_list, dim=0)
+            obs_origin["point_cloud_sky"] = point_cloud_tensor_sky
 
         point_cloud_tensor_true = torch.stack(pc_clean_list, dim=0)
         obs_origin["point_cloud_tensor_true"] = point_cloud_tensor_true
