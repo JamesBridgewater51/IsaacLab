@@ -212,7 +212,7 @@ class O12HandSim2RealEnvCfg(O12HandOpenAIEnvCfg):
     asymmetric_obs = True
     obs_type = "openai" # Use reduced observation space for the policy
     
-    fix_wrist = False
+    fix_wrist = True
 
     # -- Sim-to-Real settings
     # Enable domain randomization

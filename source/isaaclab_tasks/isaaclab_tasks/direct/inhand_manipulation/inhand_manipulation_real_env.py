@@ -17,14 +17,11 @@ from isaaclab.markers import VisualizationMarkers
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.math import quat_conjugate, quat_from_angle_axis, quat_mul, sample_uniform, saturate, random_orientation
 
-from isaaclab_tasks.direct.shadow_hand import ShadowHandRealEnvCfg, ShadowHandRealHandInitEnvCfg
-
 from termcolor import cprint
 
 class InHandManipulationRealEnv(DirectRLEnv):
-    cfg: ShadowHandRealEnvCfg | ShadowHandRealHandInitEnvCfg
 
-    def __init__(self, cfg: ShadowHandRealEnvCfg | ShadowHandRealHandInitEnvCfg, render_mode: str | None = None, **kwargs):
+    def __init__(self, cfg, render_mode: str | None = None, **kwargs):
         # cfg.viewer.eye = (-1, 0.8, 0.6)
         # cfg.viewer.lookat = (0.0, -0.45, 0.5)
         # cfg.episode_length_s = 1.0
@@ -44,12 +41,6 @@ class InHandManipulationRealEnv(DirectRLEnv):
             self.actuated_dof_indices.append(self.hand.joint_names.index(joint_name))
         self.actuated_dof_indices.sort()
 
-        self.wrist_indices = list()
-        if self.cfg.fix_wrist == True:
-            for wrist_name in ["rh_WRJ2"]:   # # 0 控制上下， 1 控制左右  (换过来应该是1和2吧)
-                self.wrist_indices.append(self.hand.joint_names.index(wrist_name))
-            self.wrist_indices.sort()
-        
         self.joint_coupling_data = []
         if hasattr(self.cfg, "joint_couplings"):
             for coupling in self.cfg.joint_couplings:
@@ -157,8 +148,7 @@ class InHandManipulationRealEnv(DirectRLEnv):
         )
         # FIXME: temporarily disable EMA between pred_actions and current dof_pos.
         # action_scaled = self.cfg.action_interpolation * action_scaled + (1.0 - self.cfg.action_interpolation) * self.hand_dof_pos[:, self.actuated_dof_indices]
-        if self.cfg.fix_wrist == True:
-            action_scaled[..., self.wrist_indices] = 0.0
+
         return action_scaled
 
 
@@ -189,6 +179,7 @@ class InHandManipulationRealEnv(DirectRLEnv):
         )
         self.hand.write_data_to_sim()
         if self.hand.data.body_pos_w.isnan().any():
+            # ISSUE: The hand.data.body_pos_w may contain NaN values, disabling self_collisions in sim_utils.ArticulationRootPropertiesCfg can solve this problem.
             breakpoint()
         if not ((self.cur_targets <= self.hand_dof_upper_limits) & (self.hand_dof_lower_limits <= self.cur_targets)).all():
             breakpoint()
