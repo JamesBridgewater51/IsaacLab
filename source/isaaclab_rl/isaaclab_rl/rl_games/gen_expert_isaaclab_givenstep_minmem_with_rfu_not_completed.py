@@ -8,7 +8,7 @@
 
 import argparse
 
-from omni.isaac.lab.app import AppLauncher
+from isaaclab.app import AppLauncher
 
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Play a checkpoint of an RL agent from RL-Games.")
@@ -84,16 +84,16 @@ from rl_games.common import env_configurations, vecenv
 from rl_games.common.player import BasePlayer
 from rl_games.torch_runner import Runner
 
-from omni.isaac.lab.utils.assets import retrieve_file_path
-from omni.isaac.lab.utils.dict import print_dict
+from isaaclab.utils.assets import retrieve_file_path
+from isaaclab.utils.dict import print_dict
 
-import omni.isaac.lab_tasks  # noqa: F401
-from omni.isaac.lab_tasks.utils import get_checkpoint_path, load_cfg_from_registry, parse_env_cfg
-from omni.isaac.lab_tasks.utils.wrappers.rl_games import RlGamesGpuEnv, RlGamesVecEnvWrapper
+import isaaclab_tasks  # noqa: F401
+from isaaclab_tasks.utils import get_checkpoint_path, load_cfg_from_registry, parse_env_cfg
+from isaaclab_rl.rl_games import RlGamesGpuEnv, RlGamesVecEnvWrapper
 
 # add imports
 from termcolor import cprint
-from omni.isaac.lab.sensors.camera.utils import create_pointcloud_from_rgbd
+from isaaclab.sensors.camera.utils import create_pointcloud_from_rgbd
 import matplotlib.pyplot as plt
 import open3d as o3d
 import copy

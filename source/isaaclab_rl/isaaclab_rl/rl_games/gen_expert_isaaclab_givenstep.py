@@ -8,7 +8,7 @@
 
 import argparse
 
-from omni.isaac.lab.app import AppLauncher
+from isaaclab.app import AppLauncher
 
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Play a checkpoint of an RL agent from RL-Games.")
@@ -50,7 +50,7 @@ parser.add_argument("--record_tactile", action="store_true", default=False, help
 
 # The "headless" and "enable_cameras" will be added in the "AppLauncher" function
 # parser.add_argument("--headless", action="store_true", default=False, help="Run in headless mode.")
-# parser.add_argument("--enable_cameras", action="store_true", default=False, help="Enable cameras rendering, see third_party/IsaacLab/source/extensions/omni.isaac.lab/omni/isaac/lab/app/app_launcher.py.")
+# parser.add_argument("--enable_cameras", action="store_true", default=False, help="Enable cameras rendering, see third_party/IsaacLab/source/extensions/isaaclab/omni/isaac/lab/app/app_launcher.py.")
 # check the keys and values in the "parser"
 
 # append AppLauncher cli args, like "--headless", "--enable_cameras", etc, so the parsers shouldn't include them
@@ -85,16 +85,16 @@ from rl_games.common import env_configurations, vecenv
 from rl_games.common.player import BasePlayer
 from rl_games.torch_runner import Runner
 
-from omni.isaac.lab.utils.assets import retrieve_file_path
-from omni.isaac.lab.utils.dict import print_dict
+from isaaclab.utils.assets import retrieve_file_path
+from isaaclab.utils.dict import print_dict
 
-import omni.isaac.lab_tasks  # noqa: F401
-from omni.isaac.lab_tasks.utils import get_checkpoint_path, load_cfg_from_registry, parse_env_cfg
-from omni.isaac.lab_tasks.utils.wrappers.rl_games import RlGamesGpuEnv, RlGamesVecEnvWrapper
+import isaaclab_tasks  # noqa: F401
+from isaaclab_tasks.utils import get_checkpoint_path, load_cfg_from_registry, parse_env_cfg
+from isaaclab_rl.rl_games import RlGamesGpuEnv, RlGamesVecEnvWrapper
 
 # add imports
 from termcolor import cprint
-from omni.isaac.lab.sensors.camera.utils import create_pointcloud_from_rgbd
+from isaaclab.sensors.camera.utils import create_pointcloud_from_rgbd
 import matplotlib.pyplot as plt
 import open3d as o3d
 import copy

@@ -401,7 +401,7 @@ class InHandManipulationRealHandInitPCTactileSingleCamEnv(InHandManipulationReal
             # NOTE: returned pts are in world frame when `use_camera_view` set to False.
             pc_noisy_, colors_noisy = get_pc_and_color(obs_origin, env_id, self.num_cameras, use_camera_view, add_noise, self.camera_rot_noise_now, self.camera_pos_noise_now)
             pc_clean_, colors_clean = get_pc_and_color(obs_origin, env_id, self.num_cameras, use_camera_view, False)
-            cprint(f"pc_clean.shape: {pc_clean_.shape}", "green", attrs=["bold"])
+            # cprint(f"pc_clean.shape: {pc_clean_.shape}", "green", attrs=["bold"])
 
             if self._pc_noise_models is not None:
                 pc_noisy_ = self._pc_noise_models[env_id](pc_noisy_)

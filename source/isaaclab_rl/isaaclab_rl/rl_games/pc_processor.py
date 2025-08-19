@@ -1,5 +1,5 @@
 import open3d as o3d
-from omni.isaac.lab.sensors.camera.utils import create_pointcloud_from_rgbd
+from isaaclab.sensors.camera.utils import create_pointcloud_from_rgbd
 
 
 class PointcloudVisualizer() :
