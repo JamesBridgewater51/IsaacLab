@@ -5,7 +5,7 @@ params:
   env:
     # added to the wrapper
     clip_observations: 5.0
-    # can make custom wrapper?
+    # actions are between -1.0~1.0
     clip_actions: 1.0
 
   algo:

@@ -19,13 +19,11 @@ from isaaclab.utils.math import quat_conjugate, quat_from_angle_axis, quat_mul, 
 
 from termcolor import cprint
 
+ENABLE_DBG = False
+
 class InHandManipulationRealEnv(DirectRLEnv):
 
     def __init__(self, cfg, render_mode: str | None = None, **kwargs):
-        # cfg.viewer.eye = (-1, 0.8, 0.6)
-        # cfg.viewer.lookat = (0.0, -0.45, 0.5)
-        # cfg.episode_length_s = 1.0
-        
         super().__init__(cfg, render_mode, **kwargs)
         
         self.num_hand_dofs = self.hand.num_joints
@@ -41,6 +39,7 @@ class InHandManipulationRealEnv(DirectRLEnv):
             self.actuated_dof_indices.append(self.hand.joint_names.index(joint_name))
         self.actuated_dof_indices.sort()
 
+        # NOTE: parse unactuated joints coupling data from cfg.
         self.joint_coupling_data = []
         if hasattr(self.cfg, "joint_couplings"):
             for coupling in self.cfg.joint_couplings:
@@ -54,7 +53,7 @@ class InHandManipulationRealEnv(DirectRLEnv):
                     "ratios": ratios
                 })
 
-        # finger bodiees
+        # finger bodies
         self.finger_bodies = list()
         for body_name in self.cfg.fingertip_body_names:
             self.finger_bodies.append(self.hand.body_names.index(body_name))
@@ -90,8 +89,10 @@ class InHandManipulationRealEnv(DirectRLEnv):
         self.z_unit_tensor = torch.tensor([0, 0, 1], dtype=torch.float, device=self.device).repeat((self.num_envs, 1))
 
         # specific traj_number is not available
+        if ENABLE_DBG:
+            self._pred_actions_dbg = []
 
-    def _proprocess_cur_target(self, cur_target):
+    def _fill_unactuated_joints(self, cur_target):
         """
         Applies complex joint coupling constraints based on the environment configuration.
         This version handles both 1-to-1 and 1-to-many couplings.
@@ -129,8 +130,7 @@ class InHandManipulationRealEnv(DirectRLEnv):
         self.hand = Articulation(self.cfg.robot_cfg)
         self.object = RigidObject(self.cfg.object_cfg)
         # add ground plane
-        # remove ground plane
-        # spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
+        spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
         # clone and replicate (no need to filter for this environment)
         self.scene.clone_environments(copy_from_source=False)
         # add articultion to scene - we must register to scene to randomize with EventManager
@@ -151,11 +151,9 @@ class InHandManipulationRealEnv(DirectRLEnv):
 
         return action_scaled
 
-
-    def _pre_physics_step(self, actions: torch.Tensor) -> None:
-        self.actions = self._pro_process_action(actions.clone())   
-
     def _apply_action(self) -> None:
+        self.actions = self._pro_process_action(self.actions)   
+
         self.cur_targets[:, self.actuated_dof_indices] = self.actions
         
         self.cur_targets[:, self.actuated_dof_indices] = (
@@ -164,7 +162,7 @@ class InHandManipulationRealEnv(DirectRLEnv):
         )
         
         # Apply the tendon system coupling constraints
-        self.cur_targets = self._proprocess_cur_target(self.cur_targets)
+        self.cur_targets = self._fill_unactuated_joints(self.cur_targets)
 
         self.cur_targets = saturate(
             self.cur_targets,
@@ -177,6 +175,16 @@ class InHandManipulationRealEnv(DirectRLEnv):
         self.hand.set_joint_position_target(
             self.cur_targets, joint_ids=None
         )
+
+        if ENABLE_DBG:
+            if self._sim_step_counter % 200 == 0:
+                self._pred_actions_dbg.append(self.cur_targets.clone())
+                cprint(f"Step {self._sim_step_counter}: Predicted actions for env(0) (targets) = {self.cur_targets[0].cpu().numpy()}", "yellow")
+            if self._sim_step_counter % 5000 == 0:
+                self._pred_actions_dbg = np.concatenate(self._pred_actions_dbg, axis=0)
+                np.save("./policy_inferenced_actions.npy", self._pred_actions_dbg)
+                self._pred_actions_dbg = []
+
         self.hand.write_data_to_sim()
         if self.hand.data.body_pos_w.isnan().any():
             # ISSUE: The hand.data.body_pos_w may contain NaN values, disabling self_collisions in sim_utils.ArticulationRootPropertiesCfg can solve this problem.
@@ -243,9 +251,6 @@ class InHandManipulationRealEnv(DirectRLEnv):
         if len(goal_env_ids) > 0:
             self._reset_target_pose(goal_env_ids)
 
-            if self.sim.has_rtx_sensors():
-                self.sim.render()
-
         return total_reward
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
@@ -270,7 +275,6 @@ class InHandManipulationRealEnv(DirectRLEnv):
             time_out = time_out | max_success_reached
         return out_of_reach, time_out
 
-    ''' reset_idx: reset the [env, the obj, the target_obj], reset_target_pose: only reset the target_obj. '''
     def _reset_idx(self, env_ids: Sequence[int] | None):
         if env_ids is None:
             env_ids = self.hand._ALL_INDICES
@@ -282,16 +286,8 @@ class InHandManipulationRealEnv(DirectRLEnv):
 
         # reset object
         object_default_state = self.object.data.default_root_state.clone()[env_ids]
-        '''Default root state ``[pos, quat, lin_vel, ang_vel]`` in local environment frame '''
-
-
-        #################################### start of seperate line ###########################################
-
-        pos_noise = sample_uniform(-0.1, 0.1, (len(env_ids), 3), device=self.device)
+        pos_noise = sample_uniform(-1.0, 1.0, (len(env_ids), 3), device=self.device)
         # global object positions
-        '''
-        keep the xyz position relatively still, but add some noise to the it
-        '''
         object_default_state[:, 0:3] = (
             object_default_state[:, 0:3] + self.cfg.reset_position_noise * pos_noise + self.scene.env_origins[env_ids]
         )
@@ -301,19 +297,20 @@ class InHandManipulationRealEnv(DirectRLEnv):
             rot_noise[:, 0], rot_noise[:, 1], self.x_unit_tensor[env_ids], self.y_unit_tensor[env_ids]
         )
 
-        # if self.cfg.object_name in ["ring", "vase", "cup", "A", "pyramid", "apple"]:
-        if self.cfg.object_name in ["ring", "vase", "cup", "A", "apple", "stick", "smallvase"]:
-            object_default_state[:, 3:7] = randomize_rotation(
-            rot_noise[:, 0], rot_noise[:, 1], self.x_unit_tensor[env_ids], self.z_unit_tensor[env_ids]  # y-axis up
-        )
-     
         object_default_state[:, 7:] = torch.zeros_like(self.object.data.default_root_state[env_ids, 7:])
-        self.object.write_root_state_to_sim(object_default_state, env_ids)
-        
-        dof_pos = 0.8 * self.hand_dof_lower_limits + 0.2 * self.hand_dof_upper_limits
-        dof_pos = dof_pos[env_ids]
+        self.object.write_root_pose_to_sim(object_default_state[:, :7], env_ids)
+        self.object.write_root_velocity_to_sim(object_default_state[:, 7:], env_ids)
 
-        dof_vel = self.hand.data.default_joint_vel[env_ids]
+        # reset hand
+        delta_max = self.hand_dof_upper_limits[env_ids] - self.hand.data.default_joint_pos[env_ids]
+        delta_min = self.hand_dof_lower_limits[env_ids] - self.hand.data.default_joint_pos[env_ids]
+
+        dof_pos_noise = sample_uniform(-1.0, 1.0, (len(env_ids), self.num_hand_dofs), device=self.device)
+        rand_delta = delta_min + (delta_max - delta_min) * 0.5 * dof_pos_noise
+        dof_pos = self.hand.data.default_joint_pos[env_ids] + self.cfg.reset_dof_pos_noise * rand_delta
+
+        dof_vel_noise = sample_uniform(-1.0, 1.0, (len(env_ids), self.num_hand_dofs), device=self.device)
+        dof_vel = self.hand.data.default_joint_vel[env_ids] + self.cfg.reset_dof_vel_noise * dof_vel_noise
 
         self.prev_targets[env_ids] = dof_pos
         self.cur_targets[env_ids] = dof_pos
@@ -321,25 +318,16 @@ class InHandManipulationRealEnv(DirectRLEnv):
 
         self.hand.set_joint_position_target(dof_pos, env_ids=env_ids)
         self.hand.write_joint_state_to_sim(dof_pos, dof_vel, env_ids=env_ids)
+
         self.successes[env_ids] = 0
         self._compute_intermediate_values()
 
-        
-
     def _reset_target_pose(self, env_ids):
-        
         # reset goal rotation
         rand_floats = sample_uniform(-1.0, 1.0, (len(env_ids), 2), device=self.device)
         new_rot = randomize_rotation(
             rand_floats[:, 0], rand_floats[:, 1], self.x_unit_tensor[env_ids], self.y_unit_tensor[env_ids]
         )
-
-        # if self.cfg.object_name in ["ring", "vase", "cup", "A", "pyramid", "apple"]:
-        if self.cfg.object_name in ["ring", "vase", "cup", "A", "apple", "stick", "smallvase"]:
-            new_rot = randomize_rotation(
-            rand_floats[:, 0], rand_floats[:, 1], self.x_unit_tensor[env_ids], self.z_unit_tensor[env_ids]  # y-axis up
-        )
-    
 
         # update goal pose and markers
         self.goal_rot[env_ids] = new_rot
@@ -487,6 +475,18 @@ def compute_rewards(
     fall_penalty: float,
     av_factor: float,
 ):
+    """
+    Params:
+    reset_buf, reset_goal_buf, successes, consecutive_successes: [num_envs]
+    object_pos, object_rot, target_pos, target_rot: [num_envs, num_features (3/4)]
+    actions: [num_envs, num_action_features]
+    Others are all scalar values.
+    Returns:
+    reward: [num_envs]
+    goal_resets: [num_envs]
+    successes: [num_envs]: Cumulative count of successes for each environment(incremented when goal achieved).
+    cons_successes: [num_envs] : Exponentially averaged consecutive successes across environments.
+    """
 
     goal_dist = torch.norm(object_pos - target_pos, p=2, dim=-1)
     rot_dist = rotation_distance(object_rot, target_rot)
@@ -515,6 +515,8 @@ def compute_rewards(
     num_resets = torch.sum(resets)
     finished_cons_successes = torch.sum(successes * resets.float())
 
+    # If `num_resets` > 0, some env satisfy termination conds. (goal_dist>fall_dist | reach maximum success number), update `consecutive_successes` as an EMA process.
+    # `finished_cons_successes / num_resets` is average of consecutive successes for envs. that need to be reset.
     cons_successes = torch.where(
         num_resets > 0,
         av_factor * finished_cons_successes / num_resets + (1.0 - av_factor) * consecutive_successes,

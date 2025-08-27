@@ -15,6 +15,7 @@ from isaaclab.assets.articulation import ArticulationCfg
 from isaaclab.actuators import IdealPDActuatorCfg
 
 O12_HAND_USD_PATH = "/home/minghao/src/robotflow/IsaacLab/assets/o12_hand_description-main/urdf/o12_t1_right/o12_t1_right.usd"  # Placeholder path
+# O12_HAND_USD_PATH = "/home/minghao/src/robotflow/IsaacLab/assets/o12_hand_description_main_original/urdf/o12_t1_right/o12_t1_right.usd"  # Placeholder path
 
 O12_HAND_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(

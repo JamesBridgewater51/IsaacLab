@@ -24,21 +24,24 @@ from isaaclab.utils import configclass
 from isaaclab.utils.math import quat_apply
 
 from isaaclab_tasks.direct.inhand_manipulation.inhand_manipulation_env import InHandManipulationEnv, unscale
+from isaaclab_tasks.direct.inhand_manipulation.inhand_manipulation_real_env import InHandManipulationRealEnv
 
-from .feature_extractor import FeatureExtractor, FeatureExtractorCfg
-from .shadow_hand_env_cfg import ShadowHandEnvCfg
+from isaaclab_tasks.direct.shadow_hand.feature_extractor import FeatureExtractor, FeatureExtractorCfg
+from isaaclab_tasks.direct.shadow_hand.shadow_hand_env_cfg import ShadowHandEnvCfg as DexHandEnvCfg
+from isaaclab_tasks.direct.o12_hand.o12_hand_env_cfg import O12HandSim2RealVisionEnvCfg as DexHandEnvCfg
+from cprint import cprint
 
 
 @configclass
-class ShadowHandVisionEnvCfg(ShadowHandEnvCfg):
+class DexHandVisionEnvCfg(DexHandEnvCfg):
     # scene
-    # scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1225, env_spacing=2.0, replicate_physics=True)
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=64, env_spacing=2.0, replicate_physics=True)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1400, env_spacing=2.0, replicate_physics=True)
 
     # camera
     tiled_camera: TiledCameraCfg = TiledCameraCfg(
         prim_path="/World/envs/env_.*/Camera",
-        offset=TiledCameraCfg.OffsetCfg(pos=(0, -0.35, 1.0), rot=(0.7071, 0.0, 0.7071, 0.0), convention="world"),
+        # offset=TiledCameraCfg.OffsetCfg(pos=(0, -0.35, 1.0), rot=(0.7071, 0.0, 0.7071, 0.0), convention="world"), # for shadow hand.
+        offset=TiledCameraCfg.OffsetCfg(pos=(0.1, 0.05, 0.8), rot=(0.21807073, 0.07232954, 0.30639284, 0.92376243), convention="opengl"), # for o12 hand.
         data_types=["rgb", "depth", "semantic_segmentation"],
         spawn=sim_utils.PinholeCameraCfg(
             focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(0.1, 20.0)
@@ -46,26 +49,22 @@ class ShadowHandVisionEnvCfg(ShadowHandEnvCfg):
         width=120,
         height=120,
     )
-    # feature_extractor = FeatureExtractorCfg()
-    feature_extractor = FeatureExtractorCfg(train=False, load_checkpoint=True)
-
-    # env
-    observation_space = 164 + 27  # state observation + vision CNN embedding
-    state_space = 187 + 27  # asymettric states + vision CNN embedding
+    feature_extractor = FeatureExtractorCfg()
 
 
 @configclass
-class ShadowHandVisionEnvPlayCfg(ShadowHandVisionEnvCfg):
+class DexHandVisionEnvPlayCfg(DexHandVisionEnvCfg):
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=64, env_spacing=2.0, replicate_physics=True)
     # inference for CNN
     feature_extractor = FeatureExtractorCfg(train=False, load_checkpoint=True)
 
 
-class ShadowHandVisionEnv(InHandManipulationEnv):
-    cfg: ShadowHandVisionEnvCfg
+# class DexHandVisionEnv(InHandManipulationEnv):
+class DexHandVisionEnv(InHandManipulationRealEnv):
+    cfg: DexHandVisionEnvCfg
 
-    def __init__(self, cfg: ShadowHandVisionEnvCfg, render_mode: str | None = None, **kwargs):
+    def __init__(self, cfg: DexHandVisionEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
         self.feature_extractor = FeatureExtractor(self.cfg.feature_extractor, self.device)
         # hide goal cubes
@@ -173,6 +172,8 @@ class ShadowHandVisionEnv(InHandManipulationEnv):
         observations = {"policy": obs, "critic": state}
         return observations
 
+    def _pre_physics_step(self, actions: torch.Tensor):
+        pass
 
 @torch.jit.script
 def compute_keypoints(

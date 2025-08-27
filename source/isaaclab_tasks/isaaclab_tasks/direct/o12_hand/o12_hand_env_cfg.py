@@ -32,14 +32,11 @@ class O12HandOpenAIEnvCfg(DirectRLEnvCfg):
     """Base configuration for the O12 OmniHand in-hand manipulation task."""
 
     # -- Environment settings
-    decimation = 3
+    decimation = 2
     episode_length_s = 10.0
-    action_space = 19
-    state_space = 0
-
-    observation_space = 119
-    asymmetric_obs = False
-    obs_type = "openai"
+    dof_hand = 12
+    num_fingertips = 5
+    action_space = dof_hand
 
     # -- Simulation settings
     sim: SimulationCfg = SimulationCfg(
@@ -50,7 +47,7 @@ class O12HandOpenAIEnvCfg(DirectRLEnvCfg):
     )
 
     # -- Scene settings
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=32, env_spacing=0.75, replicate_physics=True)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1, env_spacing=0.75, replicate_physics=True)
 
     # -- Robot settings
     robot_cfg: ArticulationCfg = O12_HAND_CFG.replace(prim_path="/World/envs/env_.*/Robot")
@@ -74,21 +71,19 @@ class O12HandOpenAIEnvCfg(DirectRLEnvCfg):
     ]
 
 
-    # object_name = "cube"
-    # object_name = "vase"
-    # object_name = "smallvase"
-    object_name = "apple"
-    # object_name = "ring"
+
+    object_name = "cube"
     root_dir = ""
+
     if object_name == "cube":
-        # usd_path = f"{ISAAC_NUCLEUS_DIR}/Props/Blocks/DexCube/dex_cube_instanceable.usd"
-        usd_path = f"assets/Blocks/DexCube/dex_cube_instanceable.usd"
+        usd_path = f"{ISAAC_NUCLEUS_DIR}/Props/Blocks/DexCube/dex_cube_instanceable.usd"
+        # usd_path = f"assets/Blocks/DexCube/dex_cube_instanceable.usd"
         _object_scale = (1.0, 1.0, 1.0)
         visual_material = None
         goal_visual_material = None
         contact_debug_vis = True
         # contact_debug_vis = False
-        episode_length_s = 8.0
+        episode_length_s = 10.0
 
     elif object_name in ["ring", "vase", "cup", "A", "pyramid", "apple", "stick", "smallvase"]:
         # usd_path = f"assets/mjcf/pen_only/DAPG_pen_only.usd"
@@ -144,12 +139,12 @@ class O12HandOpenAIEnvCfg(DirectRLEnvCfg):
                 max_depenetration_velocity=1000.0,
             ),
             # mass_props=sim_utils.MassPropertiesCfg(density=20.0),
-            # mass_props=sim_utils.MassPropertiesCfg(density=567.0),
-            mass_props=sim_utils.MassPropertiesCfg(mass=0.1),
+            mass_props=sim_utils.MassPropertiesCfg(density=567.0),
+            # mass_props=sim_utils.MassPropertiesCfg(mass=0.1),
             scale=_object_scale,
             visual_material=visual_material,  
         ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.00, -0.11, 0.505), rot=(1.0, 0.0, 0.0, 0.0)),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.00, -0.11, 0.51), rot=(1.0, 0.0, 0.0, 0.0)),
     )
     
     # -- Goal marker settings
@@ -168,8 +163,8 @@ class O12HandOpenAIEnvCfg(DirectRLEnvCfg):
                 stabilization_threshold=0.0025,
                 max_depenetration_velocity=1000.0,
             ),
-            # mass_props=sim_utils.MassPropertiesCfg(density=567.0),
-            mass_props=sim_utils.MassPropertiesCfg(mass=0.1),
+            mass_props=sim_utils.MassPropertiesCfg(density=567.0),
+            # mass_props=sim_utils.MassPropertiesCfg(mass=0.1),
             scale=_object_scale,
             visual_material=None,  
             )
@@ -177,7 +172,7 @@ class O12HandOpenAIEnvCfg(DirectRLEnvCfg):
     )
 
     contact_forces_cfg = ContactSensorCfg(
-        prim_path="/World/envs/env_.*/Robot/.*", history_length=2, debug_vis=False
+        prim_path="/World/envs/env_.*/Robot/.*", history_length=2, debug_vis=False, update_period=1/15.0,
     )
     # -- Reset and Reward settings (copied from ShadowHandEnvCfg as a starting point)
     reset_position_noise = 0.01
@@ -205,13 +200,6 @@ class O12HandSim2RealEnvCfg(O12HandOpenAIEnvCfg):
 
     # -- Environment settings
     decimation = 4  # Slower control frequency is often more stable on real hardware
-
-    action_space = 12
-    observation_space = 34
-    state_space = 169
-    asymmetric_obs = True
-    obs_type = "openai" # Use reduced observation space for the policy
-    
     fix_wrist = True
 
     # -- Sim-to-Real settings
@@ -240,7 +228,7 @@ class O12HandSim2RealEnvCfg(O12HandOpenAIEnvCfg):
     fall_penalty = -50
     success_tolerance = 0.3
     max_consecutive_success = 50
-    act_moving_average = 0.5 # More smoothing on the target commands
+    act_moving_average = 0.9 # More smoothing on the target commands
 
     # -- Under-actuation / Mimic Joint Definitions
     # These lists are defined here so a custom environment (like InHandManipulationRealEnv)
@@ -277,3 +265,23 @@ class O12HandSim2RealEnvCfg(O12HandOpenAIEnvCfg):
             "ratios": [1.066, 1.066], # Approximation based on analysis
         },
     ]
+
+@configclass
+class O12HandSim2RealVisionEnvCfg(O12HandSim2RealEnvCfg):
+
+    dof_hand = 19
+    num_fingertips = 5
+    action_space = 12
+
+    state_space = dof_hand * 2 # hand_dof_qpos, hand_dof_qvel
+    state_space += (3 + 4 + 3 + 3) # object_pos, object_rot, object_linvel, object_angvel
+    state_space += (3 + 4 + 4) # inhand_pos, goal_rot, object_rot2_goal_rot_dist
+    state_space += num_fingertips * (3 + 4 + 6 + 6) # fingertip_pos, fingertip_rot, fingertip_vel, fingertip_force_sensors_torques
+    state_space += action_space # actions
+    state_space += 27 # CNN embedding
+
+    observation_space = dof_hand * 2 # hand_dof_qpos + hand_dof_qvel
+    observation_space += (3 + 4) # object_pos + goal_rot
+    observation_space += num_fingertips * (3 + 4 + 6) # fingertip_pos + fingertip_rot + fingertip_vel
+    observation_space += action_space # actions
+    observation_space += 51 # CNN embedding
