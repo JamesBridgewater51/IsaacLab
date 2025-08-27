@@ -17,7 +17,7 @@ from isaaclab.markers import VisualizationMarkers
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.math import quat_conjugate, quat_from_angle_axis, quat_mul, sample_uniform, saturate, random_orientation
 
-from termcolor import cprint
+from cprint import cprint
 
 ENABLE_DBG = False
 
@@ -150,9 +150,13 @@ class InHandManipulationRealEnv(DirectRLEnv):
         # action_scaled = self.cfg.action_interpolation * action_scaled + (1.0 - self.cfg.action_interpolation) * self.hand_dof_pos[:, self.actuated_dof_indices]
 
         return action_scaled
+    
+    def _pre_physics_step(self, actions: torch.Tensor):
+        self.actions = self._pro_process_action(actions.clone())
 
     def _apply_action(self) -> None:
-        self.actions = self._pro_process_action(self.actions)   
+        # NOTE :in the `step` of `DirectRLEnv`, `apply_action` is called `cfg.decimation` steps in the loop since Physics should be moved at a higher frequency.
+        # NOTE: This means we need to ensure that the actions are applied consistently across these steps. So actions should be processed in a temporary buffer first.
 
         self.cur_targets[:, self.actuated_dof_indices] = self.actions
         
@@ -177,10 +181,10 @@ class InHandManipulationRealEnv(DirectRLEnv):
         )
 
         if ENABLE_DBG:
-            if self._sim_step_counter % 200 == 0:
+            if self._sim_step_counter % 1 == 0:
                 self._pred_actions_dbg.append(self.cur_targets.clone())
-                cprint(f"Step {self._sim_step_counter}: Predicted actions for env(0) (targets) = {self.cur_targets[0].cpu().numpy()}", "yellow")
-            if self._sim_step_counter % 5000 == 0:
+                cprint.ok(f"Step {self._sim_step_counter}: Predicted actions for env(0) (targets) = {self.cur_targets[0].cpu().numpy()}", "yellow")
+            if self._sim_step_counter % 200 == 0:
                 self._pred_actions_dbg = np.concatenate(self._pred_actions_dbg, axis=0)
                 np.save("./policy_inferenced_actions.npy", self._pred_actions_dbg)
                 self._pred_actions_dbg = []
@@ -433,10 +437,18 @@ class InHandManipulationRealEnv(DirectRLEnv):
 
 @torch.jit.script
 def scale(x, lower, upper):
+    """
+    Scale x from [-1, 1] to [lower, upper].
+    x := (lower+upper) / 2 + (upper-lower)/2 * x
+    """
     return 0.5 * (x + 1.0) * (upper - lower) + lower
 
 @torch.jit.script
 def unscale(x, lower, upper):
+    """
+    Unscale x from [lower, upper] to [-1, 1].
+    x := 2 * (x - (lower+upper)/2 ) / (upper-lower)
+    """
     return (2.0 * x - upper - lower) / (upper - lower)
 
 

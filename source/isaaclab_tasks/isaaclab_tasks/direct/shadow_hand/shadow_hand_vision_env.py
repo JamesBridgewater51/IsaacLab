@@ -32,8 +32,7 @@ from .shadow_hand_env_cfg import ShadowHandEnvCfg
 @configclass
 class ShadowHandVisionEnvCfg(ShadowHandEnvCfg):
     # scene
-    # scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1225, env_spacing=2.0, replicate_physics=True)
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=64, env_spacing=2.0, replicate_physics=True)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1225, env_spacing=2.0, replicate_physics=True)
 
     # camera
     tiled_camera: TiledCameraCfg = TiledCameraCfg(

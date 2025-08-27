@@ -35,7 +35,7 @@ from cprint import cprint
 @configclass
 class DexHandVisionEnvCfg(DexHandEnvCfg):
     # scene
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1400, env_spacing=2.0, replicate_physics=True)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1225, env_spacing=2.0, replicate_physics=True)
 
     # camera
     tiled_camera: TiledCameraCfg = TiledCameraCfg(
@@ -170,6 +170,7 @@ class DexHandVisionEnv(InHandManipulationRealEnv):
         state = self._compute_states()
 
         observations = {"policy": obs, "critic": state}
+        # cprint.ok(f"policy contains inf: {torch.any(torch.isinf(obs))}, critic contains inf: {torch.any(torch.isinf(state))}")
         return observations
 
     def _pre_physics_step(self, actions: torch.Tensor):
