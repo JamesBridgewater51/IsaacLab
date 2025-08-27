@@ -24,8 +24,29 @@ gym.register(
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": O12HandSim2RealEnvCfg,
-        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_ff_cfg.yaml",
+        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_vision_cfg.yaml",
     },
 )
 
 
+### Vision
+
+gym.register(
+    id="Isaac-Repose-Cube-O12-Vision-Direct-v0",
+    entry_point=f"isaaclab_tasks.direct.inhand_manipulation.dexhand_vision_env:DexHandVisionEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"isaaclab_tasks.direct.inhand_manipulation.dexhand_vision_env:DexHandVisionEnvCfg",
+        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_vision_cfg.yaml",
+    },
+)
+
+gym.register(
+    id="Isaac-Repose-Cube-O12-Vision-Direct-Play-v0",
+    entry_point=f"isaaclab_tasks.direct.inhand_manipulation.dexhand_vision_env:DexHandVisionEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"isaaclab_tasks.direct.inhand_manipulation.dexhand_vision_env:DexHandVisionEnvPlayCfg",
+        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_vision_cfg.yaml",
+    },
+)

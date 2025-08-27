@@ -343,3 +343,27 @@ gym.register(
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:ShadowHandAsymFFPPORunnerCfg",
     },
 )
+
+### Vision
+
+gym.register(
+    id="Isaac-Repose-Cube-Shadow-Vision-Direct-v0",
+    entry_point=f"{__name__}.shadow_hand_vision_env:ShadowHandVisionEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.shadow_hand_vision_env:ShadowHandVisionEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:ShadowHandVisionFFPPORunnerCfg",
+        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_vision_cfg.yaml",
+    },
+)
+
+gym.register(
+    id="Isaac-Repose-Cube-Shadow-Vision-Direct-Play-v0",
+    entry_point=f"{__name__}.shadow_hand_vision_env:ShadowHandVisionEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.shadow_hand_vision_env:ShadowHandVisionEnvPlayCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:ShadowHandVisionFFPPORunnerCfg",
+        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_vision_cfg.yaml",
+    },
+)
