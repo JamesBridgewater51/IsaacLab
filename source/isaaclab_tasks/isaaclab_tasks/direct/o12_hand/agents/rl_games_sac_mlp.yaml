@@ -1,0 +1,49 @@
+params:
+  seed: 42
+
+  env:
+    clip_observations: 5.0
+    clip_actions: 1.0
+
+  algo:
+    name: sac                      # <- requires SAC trainer, not A2C
+
+  model:
+    name: soft_actor_critic
+
+  network:
+    name: soft_actor_critic
+    separate: True                 # actor + double-Q critic
+    log_std_bounds: [-5.0, 2.0]
+    mlp:
+      units: [1024, 512, 256]
+      activation: elu
+      d2rl: False
+      initializer: { name: default }
+      regularizer: { name: None }
+
+  load_checkpoint: False
+  load_path: ''
+
+  config:
+    name: o12_hand_vision_sac_mlp
+    env_name: rlgpu
+    device: 'cuda:0'
+    device_name: 'cuda:0'
+    multi_gpu: False
+    mixed_precision: False
+    normalize_input: True
+    normalize_value: False         # SAC typically doesn’t need value normalization
+    num_actors: -1
+    reward_shaper: { scale_value: 0.01 }
+    print_stats: True
+    grad_norm: 1.0
+    horizon_length: 64
+    minibatch_size: 65536
+    mini_epochs: 1
+    seq_length: 1
+    # SAC-specific lr/alpha settings would live in your SAC trainer config if exposed
+    player:
+      deterministic: False
+      games_num: 100000
+      print_stats: True

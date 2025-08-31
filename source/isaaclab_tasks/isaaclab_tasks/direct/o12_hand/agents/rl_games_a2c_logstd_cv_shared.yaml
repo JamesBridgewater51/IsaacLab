@@ -1,11 +1,8 @@
-params:
+2params:
   seed: 42
 
-  # environment wrapper clipping
   env:
-    # added to the wrapper
     clip_observations: 5.0
-    # can make custom wrapper?
     clip_actions: 1.0
 
   algo:
@@ -17,32 +14,25 @@ params:
   network:
     name: actor_critic
     separate: False
-
     space:
       continuous:
         mu_activation: None
-        sigma_activation: None
-        mu_init:
-          name: default
-        sigma_init:
-          name: const_initializer
-          val: 0
-        fixed_sigma: True
+        sigma_activation: None      # raw log-std
+        mu_init: { name: default }
+        sigma_init: { name: const_initializer, val: 0 }  # log-std=0 -> std=1
+        fixed_sigma: True           # start with fixed log-std; compare to learned later
     mlp:
       units: [1024, 512, 512, 256, 128]
       activation: elu
       d2rl: False
+      initializer: { name: default }
+      regularizer: { name: None }
 
-      initializer:
-        name: default
-      regularizer:
-        name: None
-
-  load_checkpoint: False # flag which sets whether to load the checkpoint
-  load_path: '' # path to the checkpoint to load
+  load_checkpoint: False
+  load_path: ''
 
   config:
-    name: o12_hand_vision
+    name: o12_hand_vision_a2c_logstd_shared_cv
     env_name: rlgpu
     device: 'cuda:0'
     device_name: 'cuda:0'
@@ -52,8 +42,7 @@ params:
     normalize_input: True
     normalize_value: True
     num_actors: -1
-    reward_shaper:
-      scale_value: 0.01
+    reward_shaper: { scale_value: 0.01 }
     normalize_advantage: True
     gamma: 0.99
     tau: 0.95
@@ -67,7 +56,7 @@ params:
     save_frequency: 200
     print_stats: True
     grad_norm: 1.0
-    entropy_coef: 0.0
+    entropy_coef: 0.001              # small exploration boost
     truncate_grads: True
     e_clip: 0.2
     horizon_length: 64
@@ -88,18 +77,15 @@ params:
       clip_value: True
       normalize_input: True
       truncate_grads: True
-
       network:
         name: actor_critic
         central_value: True
         mlp:
-          units: [1024, 512, 512, 256, 128]
+          units: [512, 256]
           activation: elu
           d2rl: False
-          initializer:
-            name: default
-          regularizer:
-            name: None
+          initializer: { name: default }
+          regularizer: { name: None }
 
     player:
       deterministic: True

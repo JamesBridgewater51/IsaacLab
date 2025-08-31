@@ -317,7 +317,7 @@ class InHandManipulationRealEnv(DirectRLEnv):
         dof_vel = self.hand.data.default_joint_vel[env_ids] + self.cfg.reset_dof_vel_noise * dof_vel_noise
 
         # NOTE: this overrides the previous hand dof pos reset logics.
-        dof_pos = 0.9 * self.hand_dof_lower_limits + 0.1 * self.hand_dof_upper_limits
+        dof_pos = 0.9 * self.hand_dof_lower_limits[env_ids] + 0.1 * self.hand_dof_upper_limits[env_ids]
 
         self.prev_targets[env_ids] = dof_pos
         self.cur_targets[env_ids] = dof_pos
