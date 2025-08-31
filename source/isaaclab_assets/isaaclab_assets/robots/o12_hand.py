@@ -38,7 +38,8 @@ O12_HAND_CFG = ArticulationCfg(
     ),
     init_state=ArticulationCfg.InitialStateCfg(
         pos=(0.0, 0.0, 0.5),
-        rot=(0.3799282, 0.5213338, -0.59636781, 0.47771442), 
+        # NOTE: extrinsic rotation around z,x,y axis, 90, 115, -10 degrees.
+        rot=(0.32650558, 0.56098553, -0.62721138, 0.43045933),
         joint_pos={
             # Thumb joints
             "R_thumb_roll_joint": 0.0,

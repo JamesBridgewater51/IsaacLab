@@ -181,10 +181,10 @@ class InHandManipulationRealEnv(DirectRLEnv):
         )
 
         if ENABLE_DBG:
-            if self._sim_step_counter % 1 == 0:
-                self._pred_actions_dbg.append(self.cur_targets.clone())
-                cprint.ok(f"Step {self._sim_step_counter}: Predicted actions for env(0) (targets) = {self.cur_targets[0].cpu().numpy()}", "yellow")
-            if self._sim_step_counter % 200 == 0:
+            if self._sim_step_counter % 50 == 0:
+                self._pred_actions_dbg.append(self.cur_targets.numpy(force=True))
+                cprint.ok(f"Step {self._sim_step_counter}: Predicted actions for env(0) (targets) = {self.cur_targets[0].cpu().numpy()}")
+            if self._sim_step_counter % 500 == 0:
                 self._pred_actions_dbg = np.concatenate(self._pred_actions_dbg, axis=0)
                 np.save("./policy_inferenced_actions.npy", self._pred_actions_dbg)
                 self._pred_actions_dbg = []
@@ -315,6 +315,9 @@ class InHandManipulationRealEnv(DirectRLEnv):
 
         dof_vel_noise = sample_uniform(-1.0, 1.0, (len(env_ids), self.num_hand_dofs), device=self.device)
         dof_vel = self.hand.data.default_joint_vel[env_ids] + self.cfg.reset_dof_vel_noise * dof_vel_noise
+
+        # NOTE: this overrides the previous hand dof pos reset logics.
+        dof_pos = 0.9 * self.hand_dof_lower_limits + 0.1 * self.hand_dof_upper_limits
 
         self.prev_targets[env_ids] = dof_pos
         self.cur_targets[env_ids] = dof_pos

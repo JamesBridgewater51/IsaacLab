@@ -170,11 +170,8 @@ class DexHandVisionEnv(InHandManipulationRealEnv):
         state = self._compute_states()
 
         observations = {"policy": obs, "critic": state}
-        # cprint.ok(f"policy contains inf: {torch.any(torch.isinf(obs))}, critic contains inf: {torch.any(torch.isinf(state))}")
         return observations
 
-    def _pre_physics_step(self, actions: torch.Tensor):
-        pass
 
 @torch.jit.script
 def compute_keypoints(
