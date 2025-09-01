@@ -42,14 +42,14 @@ class DexHandVisionEnvCfg(DexHandEnvCfg):
         prim_path="/World/envs/env_.*/Camera",
         # offset=TiledCameraCfg.OffsetCfg(pos=(0, -0.35, 1.0), rot=(0.7071, 0.0, 0.7071, 0.0), convention="world"), # for shadow hand.
         offset=TiledCameraCfg.OffsetCfg(pos=(0.1, 0.05, 0.8), rot=(0.21807073, 0.07232954, 0.30639284, 0.92376243), convention="opengl"), # for o12 hand.
-        data_types=["rgb", "depth", "semantic_segmentation"],
+        data_types=["rgb"],
         spawn=sim_utils.PinholeCameraCfg(
             focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(0.1, 20.0)
         ),
         width=120,
         height=120,
     )
-    feature_extractor = FeatureExtractorCfg()
+    feature_extractor = FeatureExtractorCfg(train=True, load_checkpoint=False, input_modality="rgb_only")
 
 
 @configclass
@@ -105,10 +105,9 @@ class DexHandVisionEnv(InHandManipulationRealEnv):
 
         # train CNN to regress on keypoint positions
         pose_loss, embeddings = self.feature_extractor.step(
-            self._tiled_camera.data.output["rgb"],
-            self._tiled_camera.data.output["depth"],
-            self._tiled_camera.data.output["semantic_segmentation"][..., :3],
-            object_pose,
+            rgb_img=self._tiled_camera.data.output["rgb"],
+            depth_img=None,
+            gt_pose=object_pose,
         )
 
         self.embeddings = embeddings.clone().detach()
