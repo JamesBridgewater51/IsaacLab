@@ -13,9 +13,39 @@ import isaaclab.sim as sim_utils
 from isaaclab.actuators.actuator_cfg import ImplicitActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg
 from isaaclab.actuators import IdealPDActuatorCfg
+from scipy.spatial.transform import Rotation as R
 
 O12_HAND_USD_PATH = "/home/minghao/src/robotflow/IsaacLab/assets/o12_hand_description-main/urdf/o12_t1_right/o12_t1_right.usd"  # Placeholder path
 # O12_HAND_USD_PATH = "/home/minghao/src/robotflow/IsaacLab/assets/o12_hand_description_main_original/urdf/o12_t1_right/o12_t1_right.usd"  # Placeholder path
+
+O12_HAND_WRIST_ROT = [90.0, 90.0, -15.0]  # extrinsic rotation around z,x,y axis, in degrees.
+rot = R.from_euler('zxy', O12_HAND_WRIST_ROT, degrees=True)
+O12_HAND_WRIST_ROT_QUAT = rot.as_quat(scalar_first=True)  # (w, x, y, z)
+O12_HAND_FIX_WRIST = False
+O12_HAND_INITIAL_STATE = {
+    # Thumb joints
+    "R_thumb_roll_joint": 0.0,
+    "R_thumb_abad_joint": 0,  # Mid-range of its limit [-1.385, 0]
+    "R_thumb_mcp_joint": 0,   # Mid-range of its limit [-0.8312, 0]
+    "R_thumb_pip_joint": 0,  # Mid-range of its limit [-1.3, 0]
+    # Index finger
+    "R_index_abad_joint": 0.0,   # Mid-range of its limit [-0.26, 0.26]
+    "R_index_mcp_joint": 0.0,   # Mid-range of its limit [0, 1.5]
+    "R_index_pip_joint": 0.0,  # Mid-range of its limit [0, 1.57]
+    # Middle finger
+    "R_middle_abad_joint": 0.0,  # Mid-range of its limit [-0.26, 0.26]
+    "R_middle_mcp_joint": 0.0, # Mid-range of its limit [0, 1.49]
+    "R_middle_pip_joint": 0.0, # Mid-range of its limit [0, 1.57]
+    # Ring finger
+    "R_ring_mcp_joint": 0.0,    # Mid-range of its limit [0, 1.5583]
+    # Pinky finger
+    "R_pinky_mcp_joint": 0.0    # Mid-range of its limit [0, 1.5583]
+}
+
+if not O12_HAND_FIX_WRIST:
+    O12_HAND_INITIAL_STATE.update({
+        "R_wrist_pitch": 0.0,
+    })
 
 O12_HAND_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
@@ -39,103 +69,17 @@ O12_HAND_CFG = ArticulationCfg(
     init_state=ArticulationCfg.InitialStateCfg(
         pos=(0.0, 0.0, 0.5),
         # NOTE: extrinsic rotation around z,x,y axis, 90, 115, -10 degrees.
-        rot=(0.32650558, 0.56098553, -0.62721138, 0.43045933),
-        joint_pos={
-            # Thumb joints
-            "R_thumb_roll_joint": 0.0,
-            "R_thumb_abad_joint": -0.7,  # Mid-range of its limit [-1.385, 0]
-            "R_thumb_mcp_joint": -0.4,   # Mid-range of its limit [-0.8312, 0]
-            "R_thumb_pip_joint": -0.65,  # Mid-range of its limit [-1.3, 0]
-            # Index finger
-            "R_index_abad_joint": 0.0,   # Mid-range of its limit [-0.26, 0.26]
-            "R_index_mcp_joint": 0.75,   # Mid-range of its limit [0, 1.5]
-            "R_index_pip_joint": 0.785,  # Mid-range of its limit [0, 1.57]
-            # Middle finger
-            "R_middle_abad_joint": 0.0,  # Mid-range of its limit [-0.26, 0.26]
-            "R_middle_mcp_joint": 0.745, # Mid-range of its limit [0, 1.49]
-            "R_middle_pip_joint": 0.785, # Mid-range of its limit [0, 1.57]
-            # Ring finger
-            "R_ring_mcp_joint": 0.78,    # Mid-range of its limit [0, 1.5583]
-            # Pinky finger
-            "R_pinky_mcp_joint": 0.78    # Mid-range of its limit [0, 1.5583]
-        },
+        rot=tuple(O12_HAND_WRIST_ROT_QUAT.tolist()),
+        joint_pos=O12_HAND_INITIAL_STATE,
     ),
     actuators={
-        # Thumb actuators
-        "thumb_roll": ImplicitActuatorCfg(
-            joint_names_expr=["R_thumb_roll_joint"],
-            stiffness=50.0,
-            damping=15.0,
-            effort_limit=10.0
-        ),
-        "thumb_abad": ImplicitActuatorCfg(
-            joint_names_expr=["R_thumb_abad_joint"],
-            stiffness=50.0,
-            damping=15.0,
-            effort_limit=10.0
-        ),
-        "thumb_mcp": ImplicitActuatorCfg(
-            joint_names_expr=["R_thumb_mcp_joint"],
-            stiffness=50.0,
-            damping=15.0,
-            effort_limit=10.0
-        ),
-        "thumb_pip": ImplicitActuatorCfg(
-            joint_names_expr=["R_thumb_pip_joint"],
-            stiffness=50.0,
-            damping=15.0,
-            effort_limit=10.0
-        ),
-        # Index finger
-        "index_abad": ImplicitActuatorCfg(
-            joint_names_expr=["R_index_abad_joint"],
-            stiffness=50.0,
-            damping=15.0,
-            effort_limit=10.0
-        ),
-        "index_mcp": ImplicitActuatorCfg(
-            joint_names_expr=["R_index_mcp_joint"],
-            stiffness=50.0,
-            damping=15.0,
-            effort_limit=10.0
-        ),
-        "index_pip": ImplicitActuatorCfg(
-            joint_names_expr=["R_index_pip_joint"],
-            stiffness=50.0,
-            damping=15.0,
-            effort_limit=10.0
-        ),
-        # Middle finger
-        "middle_abad": ImplicitActuatorCfg(
-            joint_names_expr=["R_middle_abad_joint"],
-            stiffness=50.0,
-            damping=15.0,
-            effort_limit=10.0
-        ),
-        "middle_mcp": ImplicitActuatorCfg(
-            joint_names_expr=["R_middle_mcp_joint"],
-            stiffness=50.0,
-            damping=15.0,
-            effort_limit=10.0
-        ),
-        "middle_pip": ImplicitActuatorCfg(
-            joint_names_expr=["R_middle_pip_joint"],
-            stiffness=50.0,
-            damping=15.0,
-            effort_limit=10.0
-        ),
-        # Ring and pinky fingers (under-actuated)
-        "ring_mcp": ImplicitActuatorCfg(
-            joint_names_expr=["R_ring_mcp_joint"],
-            stiffness=50.0,
-            damping=15.0,
-            effort_limit=10.0
-        ),
-        "pinky_mcp": ImplicitActuatorCfg(
-            joint_names_expr=["R_pinky_mcp_joint"],
-            stiffness=50.0,
-            damping=15.0,
-            effort_limit=10.0
+        "fingers": ImplicitActuatorCfg(
+            joint_names_expr=["R_.*_joint"],
+            effort_limit={
+                "R_.*_joint": 10.0
+            },
+            stiffness=1.0,
+            damping=0.1
         )
     },
     soft_joint_pos_limit_factor=0.9,  # Slightly softer limits to prevent instability

@@ -27,7 +27,8 @@ from isaaclab_tasks.direct.inhand_manipulation.inhand_manipulation_env import In
 from isaaclab_tasks.direct.inhand_manipulation.inhand_manipulation_real_env import InHandManipulationRealEnv
 
 from isaaclab_tasks.direct.shadow_hand.feature_extractor import FeatureExtractor, FeatureExtractorCfg
-from isaaclab_tasks.direct.shadow_hand.shadow_hand_env_cfg import ShadowHandEnvCfg as DexHandEnvCfg
+# from isaaclab_tasks.direct.shadow_hand.shadow_hand_env_cfg import ShadowHandEnvCfg as DexHandEnvCfg
+# from isaaclab_tasks.direct.shadow_hand.shadow_hand_env_cfg import ShadowHandVisionEnvCfg as DexHandEnvCfg
 from isaaclab_tasks.direct.o12_hand.o12_hand_env_cfg import O12HandSim2RealVisionEnvCfg as DexHandEnvCfg
 from cprint import cprint
 
@@ -40,8 +41,10 @@ class DexHandVisionEnvCfg(DexHandEnvCfg):
     # camera
     tiled_camera: TiledCameraCfg = TiledCameraCfg(
         prim_path="/World/envs/env_.*/Camera",
+        # NOTE: 'convention' specifies camera frame convention, so 'pos' is unaffected by convention, 'rot' is affected.
+        # NOTE: camera is positioned to look down upon hand-object system.
         # offset=TiledCameraCfg.OffsetCfg(pos=(0, -0.35, 1.0), rot=(0.7071, 0.0, 0.7071, 0.0), convention="world"), # for shadow hand.
-        offset=TiledCameraCfg.OffsetCfg(pos=(0.1, 0.05, 0.8), rot=(0.21807073, 0.07232954, 0.30639284, 0.92376243), convention="opengl"), # for o12 hand.
+        offset=TiledCameraCfg.OffsetCfg(pos=(0, -0.1, 0.66), rot=(0.7071, 0.0, 0.7071, 0.0), convention="world"), # for o12 hand.
         data_types=["rgb"],
         spawn=sim_utils.PinholeCameraCfg(
             focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(0.1, 20.0)

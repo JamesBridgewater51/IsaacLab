@@ -7,6 +7,7 @@
 
 # Import the O12 Hand asset definition we created
 from isaaclab_assets.robots.o12_hand import O12_HAND_CFG
+from isaaclab_assets.robots.o12_hand import O12_HAND_FIX_WRIST
 
 import isaaclab.envs.mdp as mdp
 import isaaclab.sim as sim_utils
@@ -37,6 +38,7 @@ class O12HandOpenAIEnvCfg(DirectRLEnvCfg):
     dof_hand = 12
     num_fingertips = 5
     action_space = dof_hand
+    fix_wrist = O12_HAND_FIX_WRIST
 
     # -- Simulation settings
     sim: SimulationCfg = SimulationCfg(
@@ -60,7 +62,9 @@ class O12HandOpenAIEnvCfg(DirectRLEnvCfg):
         "R_ring_mcp_joint",
         "R_pinky_mcp_joint",
     ]
-    
+    if not fix_wrist:
+        actuated_joint_names.extend(["R_wrist_pitch"])
+
     # List of fingertip bodies for observation and reward calculation
     fingertip_body_names = [
         "R_thumb_distal",
@@ -70,15 +74,13 @@ class O12HandOpenAIEnvCfg(DirectRLEnvCfg):
         "R_pinky_distal",
     ]
 
-
-
     object_name = "cube"
     root_dir = ""
 
     if object_name == "cube":
         usd_path = f"{ISAAC_NUCLEUS_DIR}/Props/Blocks/DexCube/dex_cube_instanceable.usd"
         # usd_path = f"assets/Blocks/DexCube/dex_cube_instanceable.usd"
-        _object_scale = (0.5, 0.5, 0.5)
+        _object_scale = (0.6, 0.6, 0.6)
         visual_material = None
         goal_visual_material = None
         contact_debug_vis = True
@@ -144,7 +146,7 @@ class O12HandOpenAIEnvCfg(DirectRLEnvCfg):
             scale=_object_scale,
             visual_material=visual_material,  
         ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.00, -0.11, 0.51), rot=(1.0, 0.0, 0.0, 0.0)),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.00, -0.11, 0.6), rot=(1.0, 0.0, 0.0, 0.0)),
     )
     
     # -- Goal marker settings
@@ -200,7 +202,6 @@ class O12HandSim2RealEnvCfg(O12HandOpenAIEnvCfg):
 
     # -- Environment settings
     decimation = 4  # Slower control frequency is often more stable on real hardware
-    fix_wrist = True
 
     # -- Sim-to-Real settings
     # Enable domain randomization
@@ -272,6 +273,10 @@ class O12HandSim2RealVisionEnvCfg(O12HandSim2RealEnvCfg):
     dof_hand = 19
     num_fingertips = 5
     action_space = 12
+    fix_wrist = O12_HAND_FIX_WRIST
+    if not fix_wrist:
+        dof_hand = dof_hand + 1
+        action_space = action_space + 1
 
     state_space = dof_hand * 2 # hand_dof_qpos, hand_dof_qvel
     state_space += (3 + 4 + 3 + 3) # object_pos, object_rot, object_linvel, object_angvel

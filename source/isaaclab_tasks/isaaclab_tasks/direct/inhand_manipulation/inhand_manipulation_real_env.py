@@ -152,13 +152,14 @@ class InHandManipulationRealEnv(DirectRLEnv):
         return action_scaled
     
     def _pre_physics_step(self, actions: torch.Tensor):
-        self.actions = self._pro_process_action(actions.clone())
+        self.actions = actions.clone()
+        self.actions_unscaled = self._pro_process_action(actions.clone())
 
     def _apply_action(self) -> None:
         # NOTE :in the `step` of `DirectRLEnv`, `apply_action` is called `cfg.decimation` steps in the loop since Physics should be moved at a higher frequency.
         # NOTE: This means we need to ensure that the actions are applied consistently across these steps. So actions should be processed in a temporary buffer first.
 
-        self.cur_targets[:, self.actuated_dof_indices] = self.actions
+        self.cur_targets[:, self.actuated_dof_indices] = self.actions_unscaled.clone()
         
         self.cur_targets[:, self.actuated_dof_indices] = (
             self.cfg.act_moving_average * self.cur_targets[:, self.actuated_dof_indices]
@@ -290,7 +291,7 @@ class InHandManipulationRealEnv(DirectRLEnv):
 
         # reset object
         object_default_state = self.object.data.default_root_state.clone()[env_ids]
-        pos_noise = sample_uniform(-1.0, 1.0, (len(env_ids), 3), device=self.device)
+        pos_noise = sample_uniform(-0.1, 0.1, (len(env_ids), 3), device=self.device)
         # global object positions
         object_default_state[:, 0:3] = (
             object_default_state[:, 0:3] + self.cfg.reset_position_noise * pos_noise + self.scene.env_origins[env_ids]
@@ -312,12 +313,11 @@ class InHandManipulationRealEnv(DirectRLEnv):
         dof_pos_noise = sample_uniform(-1.0, 1.0, (len(env_ids), self.num_hand_dofs), device=self.device)
         rand_delta = delta_min + (delta_max - delta_min) * 0.5 * dof_pos_noise
         dof_pos = self.hand.data.default_joint_pos[env_ids] + self.cfg.reset_dof_pos_noise * rand_delta
+        # NOTE: settings reset dof_pos_to fixed w.o. randomness.
+        dfo_pos = self.hand.data.default_joint_pos[env_ids]
 
         dof_vel_noise = sample_uniform(-1.0, 1.0, (len(env_ids), self.num_hand_dofs), device=self.device)
         dof_vel = self.hand.data.default_joint_vel[env_ids] + self.cfg.reset_dof_vel_noise * dof_vel_noise
-
-        # NOTE: this overrides the previous hand dof pos reset logics.
-        dof_pos = 0.9 * self.hand_dof_lower_limits[env_ids] + 0.1 * self.hand_dof_upper_limits[env_ids]
 
         self.prev_targets[env_ids] = dof_pos
         self.cur_targets[env_ids] = dof_pos

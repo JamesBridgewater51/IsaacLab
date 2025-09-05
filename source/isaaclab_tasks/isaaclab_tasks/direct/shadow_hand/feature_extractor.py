@@ -188,7 +188,7 @@ class FeatureExtractor:
         img_input = self._preprocess_images(rgb_img, depth_img)
 
         if self.cfg.write_image_to_file:
-            self._save_images(rgb_img, depth_img)
+            self._save_images((rgb_img/255.0), depth_img)
 
         if self.cfg.train:
             with torch.enable_grad():
