@@ -76,10 +76,10 @@ O12_HAND_CFG = ArticulationCfg(
         "fingers": ImplicitActuatorCfg(
             joint_names_expr=["R_.*_joint"],
             effort_limit={
-                "R_.*_joint": 10.0
+                "R_.*_joint": 100.0
             },
-            stiffness=1.0,
-            damping=0.1
+            stiffness=10.0,
+            damping=0.5
         )
     },
     soft_joint_pos_limit_factor=0.9,  # Slightly softer limits to prevent instability
