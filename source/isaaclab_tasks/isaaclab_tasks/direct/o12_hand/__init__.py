@@ -6,10 +6,10 @@
 import gymnasium as gym
 
 from . import agents
-from .o12_hand_env_cfg import  O12HandOpenAIEnvCfg, O12HandSim2RealEnvCfg
+from .o12_hand_env_cfg import  O12HandSim2RealEnvCfg
 
 gym.register(
-    id="Isaac-Repose-Cube-O12-Direct-Real-v0",
+    id="Isaac-Repose-Cube-O12-Direct-v0",
     entry_point="isaaclab_tasks.direct.inhand_manipulation.inhand_manipulation_real_env:InHandManipulationRealEnv",
     disable_env_checker=True,
     kwargs={

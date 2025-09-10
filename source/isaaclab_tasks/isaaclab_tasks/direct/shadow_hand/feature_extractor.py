@@ -29,6 +29,9 @@ class FeatureExtractorCfg:
     input_modality: str = "rgb_depth"
     """Input modality type. Options: 'rgb_only', 'depth_only', 'rgb_depth'. Default is 'rgb_depth'."""
 
+    base_dir: str = ""
+    "base dir"
+
 
 class FeatureExtractorNetwork(nn.Module):
     """CNN architecture used to regress keypoint positions of the in-hand cube from image data."""
@@ -110,7 +113,7 @@ class FeatureExtractor:
         self.feature_extractor.to(self.device)
 
         self.step_count = 0
-        self.log_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), "logs")
+        self.log_dir = os.path.join(self.cfg.base_dir, "logs")
         if not os.path.exists(self.log_dir):
             os.makedirs(self.log_dir)
 
@@ -167,9 +170,11 @@ class FeatureExtractor:
             depth_img (torch.Tensor, optional): Depth image tensor. Shape: (N, H, W, 1).
         """
         if rgb_img is not None:
-            save_images_to_file(rgb_img, "shadow_hand_rgb.png")
+            rgb_path = os.path.join(self.cfg.base_dir, f"rgb_{self.cfg.input_modality}_step_{self.step_count:06d}.png")
+            save_images_to_file(rgb_img, rgb_path)
         if depth_img is not None:
-            save_images_to_file(depth_img, "shadow_hand_depth.png")
+            depth_path = os.path.join(self.cfg.base_dir, f"depth_{self.cfg.input_modality}_step_{self.step_count:06d}.png")
+            save_images_to_file(depth_img, depth_path)
 
     def step(
         self, rgb_img: torch.Tensor = None, depth_img: torch.Tensor = None, gt_pose: torch.Tensor = None

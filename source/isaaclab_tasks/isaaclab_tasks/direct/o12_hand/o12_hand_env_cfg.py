@@ -8,6 +8,9 @@
 # Import the O12 Hand asset definition we created
 from isaaclab_assets.robots.o12_hand import O12_HAND_CFG
 from isaaclab_assets.robots.o12_hand import O12_HAND_FIX_WRIST
+from isaaclab_assets.robots.o12_hand import O12_HAND_INCLUDE_VEL_IN_OBS
+from isaaclab_assets.robots.o12_hand import O12_HAND_HAS_VISION
+from isaaclab_assets.robots.o12_hand import O12_HAND_HAS_FINGERTIP_FORCE_SENSOR
 
 import isaaclab.envs.mdp as mdp
 import isaaclab.sim as sim_utils
@@ -27,7 +30,6 @@ from isaaclab.sensors import ContactSensorCfg
 import os
 
 
-
 @configclass
 class O12HandOpenAIEnvCfg(DirectRLEnvCfg):
     """Base configuration for the O12 OmniHand in-hand manipulation task."""
@@ -39,7 +41,11 @@ class O12HandOpenAIEnvCfg(DirectRLEnvCfg):
     num_fingertips = 5
     action_space = dof_hand
     fix_wrist = O12_HAND_FIX_WRIST
+    include_vel_in_obs = O12_HAND_INCLUDE_VEL_IN_OBS
+    has_vision = O12_HAND_HAS_VISION
+    has_fingertip_contact_forces = O12_HAND_HAS_FINGERTIP_FORCE_SENSOR
 
+    events: EventCfg = EventCfg()
     # -- Simulation settings
     sim: SimulationCfg = SimulationCfg(
         dt=1 / 120,
@@ -63,7 +69,7 @@ class O12HandOpenAIEnvCfg(DirectRLEnvCfg):
         "R_pinky_mcp_joint",
     ]
     if not fix_wrist:
-        actuated_joint_names.extend(["R_wrist_pitch"])
+        actuated_joint_names.extend(["R_wrist_pitch_joint"])
 
     # List of fingertip bodies for observation and reward calculation
     fingertip_body_names = [
@@ -73,6 +79,34 @@ class O12HandOpenAIEnvCfg(DirectRLEnvCfg):
         "R_ring_distal",
         "R_pinky_distal",
     ]
+    
+    joint_couplings = [
+        {
+            "actuated": "R_thumb_pip_joint",
+            "mimicked": ["R_thumb_dip_joint"],
+            "ratios": [0.84],
+        },
+        {
+            "actuated": "R_index_pip_joint",
+            "mimicked": ["R_index_dip_joint"],
+            "ratios": [1.144],
+        },
+        {
+            "actuated": "R_middle_pip_joint",
+            "mimicked": ["R_middle_dip_joint"],
+            "ratios": [1.144],
+        },
+        {
+            "actuated": "R_ring_mcp_joint",
+            "mimicked": ["R_ring_pip_joint", "R_ring_dip_joint"],
+            "ratios": [1.066, 1.066], # Approximation based on analysis
+        },
+        {
+            "actuated": "R_pinky_mcp_joint",
+            "mimicked": ["R_pinky_pip_joint", "R_pinky_dip_joint"],
+            "ratios": [1.066, 1.066], # Approximation based on analysis
+        },
+    ]
 
     object_name = "cube"
     root_dir = ""
@@ -80,7 +114,7 @@ class O12HandOpenAIEnvCfg(DirectRLEnvCfg):
     if object_name == "cube":
         usd_path = f"{ISAAC_NUCLEUS_DIR}/Props/Blocks/DexCube/dex_cube_instanceable.usd"
         # usd_path = f"assets/Blocks/DexCube/dex_cube_instanceable.usd"
-        _object_scale = (0.6, 0.6, 0.6)
+        object_scale = (1.2, 1.2, 1.2)
         visual_material = None
         goal_visual_material = None
         contact_debug_vis = True
@@ -90,7 +124,7 @@ class O12HandOpenAIEnvCfg(DirectRLEnvCfg):
     elif object_name in ["ring", "vase", "cup", "A", "pyramid", "apple", "stick", "smallvase"]:
         # usd_path = f"assets/mjcf/pen_only/DAPG_pen_only.usd"
         usd_path = f"assets/shape_variant/thingi10k/colored_obj_stl/{object_name}/usd_color/model.usd"
-        _object_scale = OBJ_ATTR_DICT[object_name]["scale"]
+        object_scale = OBJ_ATTR_DICT[object_name]["scale"]
         _diffuse_color = OBJ_ATTR_DICT[object_name]["color"]
         # goal_diffuse_color = (0.0, 1.0, 0.0)  # green
         goal_diffuse_color = _diffuse_color
@@ -106,7 +140,7 @@ class O12HandOpenAIEnvCfg(DirectRLEnvCfg):
         # episode_length_s = 8.0
 
     else:
-        _object_scale = OBJ_ATTR_DICT[object_name]["scale"]
+        object_scale = OBJ_ATTR_DICT[object_name]["scale"]
         _diffuse_color = OBJ_ATTR_DICT[object_name]["color"]
         goal_diffuse_color = _diffuse_color
         # act_moving_average = OBJ_ATTR_DICT[object_name]["moving_avg"]
@@ -140,10 +174,8 @@ class O12HandOpenAIEnvCfg(DirectRLEnvCfg):
                 stabilization_threshold=0.0025,
                 max_depenetration_velocity=1000.0,
             ),
-            # mass_props=sim_utils.MassPropertiesCfg(density=20.0),
-            mass_props=sim_utils.MassPropertiesCfg(density=567.0),
-            # mass_props=sim_utils.MassPropertiesCfg(mass=0.1),
-            scale=_object_scale,
+            mass_props=sim_utils.MassPropertiesCfg(mass=0.1),
+            scale=object_scale,
             visual_material=visual_material,  
         ),
         init_state=RigidObjectCfg.InitialStateCfg(pos=(0.00, -0.11, 0.6), rot=(1.0, 0.0, 0.0, 0.0)),
@@ -165,17 +197,29 @@ class O12HandOpenAIEnvCfg(DirectRLEnvCfg):
                 stabilization_threshold=0.0025,
                 max_depenetration_velocity=1000.0,
             ),
-            mass_props=sim_utils.MassPropertiesCfg(density=567.0),
-            # mass_props=sim_utils.MassPropertiesCfg(mass=0.1),
-            scale=_object_scale,
+            mass_props=sim_utils.MassPropertiesCfg(mass=0.1),
+            scale=object_scale,
             visual_material=None,  
             )
         },
+    )
+    
+    action_noise_model: NoiseModelWithAdditiveBiasCfg = NoiseModelWithAdditiveBiasCfg(
+        noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.05, operation="add"),
+        bias_noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.015, operation="abs"),
+    )
+    observation_noise_model: NoiseModelWithAdditiveBiasCfg = NoiseModelWithAdditiveBiasCfg(
+        noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.002, operation="add"),
+        bias_noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.0001, operation="abs"),
     )
 
     contact_forces_cfg = ContactSensorCfg(
         prim_path="/World/envs/env_.*/Robot/.*", history_length=2, debug_vis=False, update_period=1/15.0,
     )
+
+    asymmetric_obs = True
+    obs_type = "openai" 
+
     # -- Reset and Reward settings (copied from ShadowHandEnvCfg as a starting point)
     reset_position_noise = 0.01
     reset_dof_pos_noise = 0.2
@@ -186,89 +230,19 @@ class O12HandOpenAIEnvCfg(DirectRLEnvCfg):
     rot_eps = 0.1
     action_penalty_scale = -0.0002
     reach_goal_bonus = 250
-    fall_penalty = 0
+    fall_penalty = -50
     fall_dist = 0.24
     vel_obs_scale = 0.2
-    success_tolerance = 0.1
-    max_consecutive_success = 0
+    success_tolerance = 0.3
+    max_consecutive_success = 50
     av_factor = 0.1
-    act_moving_average = 1.0
-    force_torque_obs_scale = 10.0
+    act_moving_average = 0.9
 
+    if has_fingertip_contact_forces:
+        force_torque_obs_scale = 10.0
 
 @configclass
 class O12HandSim2RealEnvCfg(O12HandOpenAIEnvCfg):
-    """Configuration for the O12 OmniHand focused on Sim-to-Real transfer."""
-
-    # -- Environment settings
-    decimation = 4  # Slower control frequency is often more stable on real hardware
-
-    # -- Sim-to-Real settings
-    # Enable domain randomization
-    events: EventCfg = EventCfg()
-    
-    # Add noise to actions and observations for robustness
-    action_noise_model: NoiseModelWithAdditiveBiasCfg = NoiseModelWithAdditiveBiasCfg(
-        noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.05, operation="add"),
-        bias_noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.015, operation="abs"),
-    )
-    observation_noise_model: NoiseModelWithAdditiveBiasCfg = NoiseModelWithAdditiveBiasCfg(
-        noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.002, operation="add"),
-        bias_noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.0001, operation="abs"),
-    )
-    point_cloud_noise_model: NoiseModelWithAdditiveBiasCfg = NoiseModelWithAdditiveBiasCfg(
-        noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.002, operation="add"),
-        bias_noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.002, operation="abs"),
-    )
-    # -- Realistic Control Interface
-    # This parameter would be used by a custom environment (like InHandManipulationRealEnv)
-    # to interpolate between the policy's target and the current joint state.
-    action_interpolation = 0.3 # A good starting value for smooth control
-
-    # -- Reward and Reset settings (tuned for more robust learning)
-    fall_penalty = -50
-    success_tolerance = 0.3
-    max_consecutive_success = 50
-    act_moving_average = 0.9 # More smoothing on the target commands
-
-    # -- Under-actuation / Mimic Joint Definitions
-    # These lists are defined here so a custom environment (like InHandManipulationRealEnv)
-    # can read them and enforce the kinematic constraints.
-    # NOTE: The ring and pinky fingers have complex couplings in the MJCF.
-    # A simple 1-to-1 mimic might not be sufficient. A more advanced
-    # environment would need to implement the polynomial or tendon constraints.
-    # For now, we define the most direct couplings.
-    
-    joint_couplings = [
-        {
-            "actuated": "R_thumb_pip_joint",
-            "mimicked": ["R_thumb_dip_joint"],
-            "ratios": [0.84],
-        },
-        {
-            "actuated": "R_index_pip_joint",
-            "mimicked": ["R_index_dip_joint"],
-            "ratios": [1.144],
-        },
-        {
-            "actuated": "R_middle_pip_joint",
-            "mimicked": ["R_middle_dip_joint"],
-            "ratios": [1.144],
-        },
-        {
-            "actuated": "R_ring_mcp_joint",
-            "mimicked": ["R_ring_pip_joint", "R_ring_dip_joint"],
-            "ratios": [1.066, 1.066], # Approximation based on analysis
-        },
-        {
-            "actuated": "R_pinky_mcp_joint",
-            "mimicked": ["R_pinky_pip_joint", "R_pinky_dip_joint"],
-            "ratios": [1.066, 1.066], # Approximation based on analysis
-        },
-    ]
-
-@configclass
-class O12HandSim2RealVisionEnvCfg(O12HandSim2RealEnvCfg):
 
     dof_hand = 19
     num_fingertips = 5
@@ -278,15 +252,39 @@ class O12HandSim2RealVisionEnvCfg(O12HandSim2RealEnvCfg):
         dof_hand = dof_hand + 1
         action_space = action_space + 1
 
-    state_space = dof_hand * 2 # hand_dof_qpos, hand_dof_qvel
-    state_space += (3 + 4 + 3 + 3) # object_pos, object_rot, object_linvel, object_angvel
-    state_space += (3 + 4 + 4) # inhand_pos, goal_rot, object_rot2_goal_rot_dist
-    state_space += num_fingertips * (3 + 4 + 6 + 6) # fingertip_pos, fingertip_rot, fingertip_vel, fingertip_force_sensors_torques
-    state_space += action_space # actions
-    state_space += 27 # CNN embedding
+    # State space calculation
+    if O12_HAND_INCLUDE_VEL_IN_OBS:
+        state_space = dof_hand * 2  # hand_dof_qpos, hand_dof_qvel
+    else:
+        state_space = dof_hand * 1  # hand_dof_qpos only
+    
+    state_space += (3 + 4 + 3 + 3)  # object_pos, object_rot, object_linvel, object_angvel
+    state_space += (3 + 4 + 4)  # inhand_pos, goal_rot, object_rot2_goal_rot_dist
+    
+    if O12_HAND_INCLUDE_VEL_IN_OBS:
+        state_space += num_fingertips * (3 + 4 + 6 + 6)  # fingertip_pos, fingertip_rot, fingertip_vel, fingertip_force_sensors_torques
+    else:
+        state_space += num_fingertips * (3 + 4)  # fingertip_pos, fingertip_rot only
+    
+    state_space += action_space  # actions
+    
+    if O12_HAND_HAS_VISION:
+        state_space += 27  # CNN embedding
 
-    observation_space = dof_hand * 2 # hand_dof_qpos + hand_dof_qvel
-    observation_space += (3 + 4) # object_pos + goal_rot
-    observation_space += num_fingertips * (3 + 4 + 6) # fingertip_pos + fingertip_rot + fingertip_vel
-    observation_space += action_space # actions
-    observation_space += 51 # CNN embedding
+    # Observation space calculation
+    if O12_HAND_INCLUDE_VEL_IN_OBS:
+        observation_space = dof_hand * 2  # hand_dof_qpos + hand_dof_qvel
+    else:
+        observation_space = dof_hand * 1  # hand_dof_qpos only
+    
+    observation_space += 3  # object_pos
+    
+    if O12_HAND_INCLUDE_VEL_IN_OBS:
+        observation_space += num_fingertips * (3 + 4 + 6)  # fingertip_pos + fingertip_rot + fingertip_vel
+    else:
+        observation_space += num_fingertips * (3 + 4)  # fingertip_pos + fingertip_rot only
+    
+    observation_space += action_space  # actions
+    
+    if O12_HAND_HAS_VISION:
+        observation_space += 51  # CNN embedding

@@ -32,7 +32,7 @@ from .shadow_hand_env_cfg import ShadowHandEnvCfg
 @configclass
 class ShadowHandVisionEnvCfg(ShadowHandEnvCfg):
     # scene
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1225, env_spacing=2.0, replicate_physics=True)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=2.0, replicate_physics=True)
 
     # camera
     tiled_camera: TiledCameraCfg = TiledCameraCfg(
@@ -46,7 +46,7 @@ class ShadowHandVisionEnvCfg(ShadowHandEnvCfg):
         height=120,
     )
     # feature_extractor = FeatureExtractorCfg()
-    feature_extractor = FeatureExtractorCfg(train=False, load_checkpoint=True)
+    feature_extractor = FeatureExtractorCfg(train=False, load_checkpoint=True, input_modality="rgb_only")
 
     # env
     observation_space = 164 + 27  # state observation + vision CNN embedding
@@ -58,7 +58,7 @@ class ShadowHandVisionEnvPlayCfg(ShadowHandVisionEnvCfg):
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=64, env_spacing=2.0, replicate_physics=True)
     # inference for CNN
-    feature_extractor = FeatureExtractorCfg(train=False, load_checkpoint=True)
+    feature_extractor = FeatureExtractorCfg(train=False, load_checkpoint=True, input_modality="rgb_only")
 
 
 class ShadowHandVisionEnv(InHandManipulationEnv):
@@ -105,10 +105,9 @@ class ShadowHandVisionEnv(InHandManipulationEnv):
 
         # train CNN to regress on keypoint positions
         pose_loss, embeddings = self.feature_extractor.step(
-            self._tiled_camera.data.output["rgb"],
-            self._tiled_camera.data.output["depth"],
-            self._tiled_camera.data.output["semantic_segmentation"][..., :3],
-            object_pose,
+            rgb_img=self._tiled_camera.data.output["rgb"],
+            depth_img=None,
+            gt_pose=object_pose,
         )
 
         self.embeddings = embeddings.clone().detach()

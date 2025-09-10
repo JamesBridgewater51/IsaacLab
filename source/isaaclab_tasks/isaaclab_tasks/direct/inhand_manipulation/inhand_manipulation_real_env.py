@@ -312,12 +312,14 @@ class InHandManipulationRealEnv(DirectRLEnv):
 
         dof_pos_noise = sample_uniform(-1.0, 1.0, (len(env_ids), self.num_hand_dofs), device=self.device)
         rand_delta = delta_min + (delta_max - delta_min) * 0.5 * dof_pos_noise
-        dof_pos = self.hand.data.default_joint_pos[env_ids] + self.cfg.reset_dof_pos_noise * rand_delta
+        # dof_pos = self.hand.data.default_joint_pos[env_ids] + self.cfg.reset_dof_pos_noise * rand_delta
         # NOTE: settings reset dof_pos_to fixed w.o. randomness.
-        dfo_pos = self.hand.data.default_joint_pos[env_ids]
+        dof_pos = self.hand.data.default_joint_pos[env_ids]
 
         dof_vel_noise = sample_uniform(-1.0, 1.0, (len(env_ids), self.num_hand_dofs), device=self.device)
-        dof_vel = self.hand.data.default_joint_vel[env_ids] + self.cfg.reset_dof_vel_noise * dof_vel_noise
+        # dof_vel = self.hand.data.default_joint_vel[env_ids] + self.cfg.reset_dof_vel_noise * dof_vel_noise
+        # NOTE: settings reset dof_vel to fixed w.o. randomness.
+        dof_vel = self.hand.data.default_joint_vel[env_ids]
 
         self.prev_targets[env_ids] = dof_pos
         self.cur_targets[env_ids] = dof_pos
@@ -383,58 +385,87 @@ class InHandManipulationRealEnv(DirectRLEnv):
         return obs
 
     def compute_full_observations(self):
-        obs = torch.cat(
-            (
-                # hand
-                unscale(self.hand_dof_pos, self.hand_dof_lower_limits, self.hand_dof_upper_limits),
-                self.cfg.vel_obs_scale * self.hand_dof_vel,
-                # object
-                self.object_pos,
-                self.object_rot,
+        obs_components = []
+        
+        # hand components
+        obs_components.append(unscale(self.hand_dof_pos, self.hand_dof_lower_limits, self.hand_dof_upper_limits))
+        if self.cfg.include_vel_in_obs:
+            obs_components.append(self.cfg.vel_obs_scale * self.hand_dof_vel)
+        
+        # object components
+        obs_components.extend([
+            self.object_pos,
+            self.object_rot,
+        ])
+        if self.cfg.include_vel_in_obs:
+            obs_components.extend([
                 self.object_linvel,
                 self.cfg.vel_obs_scale * self.object_angvel,
-                # goal
-                self.in_hand_pos,
-                self.goal_rot,
-                quat_mul(self.object_rot, quat_conjugate(self.goal_rot)),
-                # fingertips
-                self.fingertip_pos.view(self.num_envs, self.num_fingertips * 3),
-                self.fingertip_rot.view(self.num_envs, self.num_fingertips * 4),
-                self.fingertip_velocities.view(self.num_envs, self.num_fingertips * 6),
-                # actions
-                self.actions,
-            ),
-            dim=-1,
-        )
+            ])
         
+        # goal components
+        obs_components.extend([
+            self.in_hand_pos,
+            self.goal_rot,
+            quat_mul(self.object_rot, quat_conjugate(self.goal_rot)),
+        ])
+        
+        # fingertip components
+        obs_components.extend([
+            self.fingertip_pos.view(self.num_envs, self.num_fingertips * 3),
+            self.fingertip_rot.view(self.num_envs, self.num_fingertips * 4),
+        ])
+        if self.cfg.include_vel_in_obs:
+            obs_components.append(self.fingertip_velocities.view(self.num_envs, self.num_fingertips * 6))
+        
+        # action components
+        obs_components.append(self.actions)
+        
+        obs = torch.cat(obs_components, dim=-1)
         return obs
 
     def compute_full_state(self):
-        states = torch.cat(
-            (
-                # hand
-                unscale(self.hand_dof_pos, self.hand_dof_lower_limits, self.hand_dof_upper_limits),
-                self.cfg.vel_obs_scale * self.hand_dof_vel,
-                # object
-                self.object_pos,
-                self.object_rot,
+        states_components = []
+        
+        # hand components
+        states_components.append(unscale(self.hand_dof_pos, self.hand_dof_lower_limits, self.hand_dof_upper_limits))
+        if self.cfg.include_vel_in_obs:
+            states_components.append(self.cfg.vel_obs_scale * self.hand_dof_vel)
+        
+        # object components
+        states_components.extend([
+            self.object_pos,
+            self.object_rot,
+        ])
+        if self.cfg.include_vel_in_obs:
+            states_components.extend([
                 self.object_linvel,
                 self.cfg.vel_obs_scale * self.object_angvel,
-                # goal
-                self.in_hand_pos,
-                self.goal_rot,
-                quat_mul(self.object_rot, quat_conjugate(self.goal_rot)),
-                # fingertips
-                self.fingertip_pos.view(self.num_envs, self.num_fingertips * 3),
-                self.fingertip_rot.view(self.num_envs, self.num_fingertips * 4),
-                self.fingertip_velocities.view(self.num_envs, self.num_fingertips * 6),
-                self.cfg.force_torque_obs_scale
-                * self.fingertip_force_sensors.view(self.num_envs, self.num_fingertips * 6),
-                # actions
-                self.actions,
-            ),
-            dim=-1,
-        )
+            ])
+        
+        # goal components
+        states_components.extend([
+            self.in_hand_pos,
+            self.goal_rot,
+            quat_mul(self.object_rot, quat_conjugate(self.goal_rot)),
+        ])
+        
+        # fingertip components
+        states_components.extend([
+            self.fingertip_pos.view(self.num_envs, self.num_fingertips * 3),
+            self.fingertip_rot.view(self.num_envs, self.num_fingertips * 4),
+        ])
+        if self.cfg.include_vel_in_obs:
+            states_components.append(self.fingertip_velocities.view(self.num_envs, self.num_fingertips * 6))
+        
+        # force/torque components
+        if self.cfg.has_fingertip_contact_forces:
+            states_components.append(self.cfg.force_torque_obs_scale * self.fingertip_force_sensors.view(self.num_envs, self.num_fingertips * 6))
+        
+        # action components
+        states_components.append(self.actions)
+        
+        states = torch.cat(states_components, dim=-1)
         return states
 
 

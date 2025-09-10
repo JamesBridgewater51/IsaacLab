@@ -27,11 +27,15 @@ from isaaclab_tasks.direct.inhand_manipulation.inhand_manipulation_env import In
 from isaaclab_tasks.direct.inhand_manipulation.inhand_manipulation_real_env import InHandManipulationRealEnv
 
 from isaaclab_tasks.direct.shadow_hand.feature_extractor import FeatureExtractor, FeatureExtractorCfg
-# from isaaclab_tasks.direct.shadow_hand.shadow_hand_env_cfg import ShadowHandEnvCfg as DexHandEnvCfg
-# from isaaclab_tasks.direct.shadow_hand.shadow_hand_env_cfg import ShadowHandVisionEnvCfg as DexHandEnvCfg
-from isaaclab_tasks.direct.o12_hand.o12_hand_env_cfg import O12HandSim2RealVisionEnvCfg as DexHandEnvCfg
+from isaaclab_tasks.direct.shadow_hand.shadow_hand_env_cfg import ShadowHandEnvCfg as DexHandEnvCfg
+from isaaclab_tasks.direct.shadow_hand.shadow_hand_env_cfg import ShadowHandVisionEnvCfg as DexHandEnvCfg
+from isaaclab_tasks.direct.o12_hand.o12_hand_env_cfg import O12HandSim2RealEnvCfg as DexHandEnvCfg
 from cprint import cprint
+import datetime
+import os
 
+
+CURRENT_TIME = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
 
 @configclass
 class DexHandVisionEnvCfg(DexHandEnvCfg):
@@ -44,7 +48,7 @@ class DexHandVisionEnvCfg(DexHandEnvCfg):
         # NOTE: 'convention' specifies camera frame convention, so 'pos' is unaffected by convention, 'rot' is affected.
         # NOTE: camera is positioned to look down upon hand-object system.
         # offset=TiledCameraCfg.OffsetCfg(pos=(0, -0.35, 1.0), rot=(0.7071, 0.0, 0.7071, 0.0), convention="world"), # for shadow hand.
-        offset=TiledCameraCfg.OffsetCfg(pos=(0, -0.1, 0.66), rot=(0.7071, 0.0, 0.7071, 0.0), convention="world"), # for o12 hand.
+        offset=TiledCameraCfg.OffsetCfg(pos=(0, -0.1, 1.0), rot=(0.7071, 0.0, 0.7071, 0.0), convention="world"), # for o12 hand.
         data_types=["rgb"],
         spawn=sim_utils.PinholeCameraCfg(
             focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(0.1, 20.0)
@@ -52,7 +56,7 @@ class DexHandVisionEnvCfg(DexHandEnvCfg):
         width=120,
         height=120,
     )
-    feature_extractor = FeatureExtractorCfg(train=True, load_checkpoint=False, input_modality="rgb_only")
+    feature_extractor = FeatureExtractorCfg(train=True, load_checkpoint=False, input_modality="rgb_only", base_dir=os.path.join(os.path.dirname(os.path.dirname(__file__)), "o12_hand", CURRENT_TIME))
 
 
 @configclass
@@ -60,21 +64,18 @@ class DexHandVisionEnvPlayCfg(DexHandVisionEnvCfg):
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=64, env_spacing=2.0, replicate_physics=True)
     # inference for CNN
-    feature_extractor = FeatureExtractorCfg(train=False, load_checkpoint=True)
+    feature_extractor = FeatureExtractorCfg(train=False, load_checkpoint=True, input_modality="rgb_only", base_dir = "")
 
 
-# class DexHandVisionEnv(InHandManipulationEnv):
 class DexHandVisionEnv(InHandManipulationRealEnv):
     cfg: DexHandVisionEnvCfg
 
     def __init__(self, cfg: DexHandVisionEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
         self.feature_extractor = FeatureExtractor(self.cfg.feature_extractor, self.device)
-        # hide goal cubes
-        self.goal_pos[:, :] = torch.tensor([-0.2, 0.1, 0.6], device=self.device)
-        # keypoints buffer
         self.gt_keypoints = torch.ones(self.num_envs, 8, 3, dtype=torch.float32, device=self.device)
         self.goal_keypoints = torch.ones(self.num_envs, 8, 3, dtype=torch.float32, device=self.device)
+        assert self.cfg.has_vision, "DexHandVisionEnv requires cfg.has_vision = True"
 
     def _setup_scene(self):
         # add hand, in-hand object, and goal object
@@ -101,8 +102,9 @@ class DexHandVisionEnv(InHandManipulationRealEnv):
         light_cfg.func("/World/Light", light_cfg)
 
     def _compute_image_observations(self):
-        # generate ground truth keypoints for in-hand cube
-        compute_keypoints(pose=torch.cat((self.object_pos, self.object_rot), dim=1), out=self.gt_keypoints)
+        # default size of Nuclues server's cube is 0.06m
+        size = (2 * 0.03 * self.cfg.object_scale[0], 2 * 0.03 * self.cfg.object_scale[1], 2 * 0.03 * self.cfg.object_scale[2])
+        compute_keypoints(pose=torch.cat((self.object_pos, self.object_rot), dim=1), size=size, out=self.gt_keypoints)
 
         object_pose = torch.cat([self.object_pos, self.gt_keypoints.view(-1, 24)], dim=-1)
 
@@ -114,9 +116,8 @@ class DexHandVisionEnv(InHandManipulationRealEnv):
         )
 
         self.embeddings = embeddings.clone().detach()
-        # compute keypoints for goal cube
         compute_keypoints(
-            pose=torch.cat((torch.zeros_like(self.goal_pos), self.goal_rot), dim=-1), out=self.goal_keypoints
+            pose=torch.cat((torch.zeros_like(self.goal_pos), self.goal_rot), dim=-1), size=size, out=self.goal_keypoints
         )
 
         obs = torch.cat(
@@ -136,23 +137,38 @@ class DexHandVisionEnv(InHandManipulationRealEnv):
 
     def _compute_proprio_observations(self):
         """Proprioception observations from physics."""
-        obs = torch.cat(
-            (
-                # hand
-                unscale(self.hand_dof_pos, self.hand_dof_lower_limits, self.hand_dof_upper_limits),
-                self.cfg.vel_obs_scale * self.hand_dof_vel,
-                # goal
-                self.in_hand_pos,
-                self.goal_rot,
-                # fingertips
-                self.fingertip_pos.view(self.num_envs, self.num_fingertips * 3),
-                self.fingertip_rot.view(self.num_envs, self.num_fingertips * 4),
-                self.fingertip_velocities.view(self.num_envs, self.num_fingertips * 6),
-                # actions
-                self.actions,
-            ),
-            dim=-1,
-        )
+        # default size of Nuclues server's cube is 0.06m
+        size = (2 * 0.03 * self.cfg.object_scale[0], 2 * 0.03 * self.cfg.object_scale[1], 2 * 0.03 * self.cfg.object_scale[2])
+        # NOTE: use zeor-positioned cube's keypoints as goal keypoints.
+        zero_pos_goal_keypoints = self.goal_keypoints.clone()
+        compute_keypoints(pose=torch.cat((torch.zeros_like(self.goal_pos), self.goal_rot), dim=1), size=size, out=zero_pos_goal_keypoints)
+        # Base observation components
+        obs_components = [
+            # hand joint positions (normalized)
+            unscale(self.hand_dof_pos, self.hand_dof_lower_limits, self.hand_dof_upper_limits),
+        ]
+        
+        # Add hand joint velocities if enabled
+        if self.cfg.include_vel_in_obs:
+            obs_components.append(self.cfg.vel_obs_scale * self.hand_dof_vel)
+        
+        # Add remaining components
+        obs_components.extend([
+            # goal position
+            self.in_hand_pos,
+            # fingertip positions and orientations
+            self.fingertip_pos.view(self.num_envs, self.num_fingertips * 3),
+            self.fingertip_rot.view(self.num_envs, self.num_fingertips * 4),
+        ])
+        
+        # Add fingertip velocities if enabled
+        if self.cfg.include_vel_in_obs:
+            obs_components.append(self.fingertip_velocities.view(self.num_envs, self.num_fingertips * 6))
+        
+        # Add actions
+        obs_components.append(self.actions)
+        
+        obs = torch.cat(obs_components, dim=-1)
         return obs
 
     def _compute_states(self):
@@ -168,7 +184,8 @@ class DexHandVisionEnv(InHandManipulationRealEnv):
         image_obs = self._compute_image_observations()
         obs = torch.cat((state_obs, image_obs), dim=-1)
         # asymmetric critic states
-        self.fingertip_force_sensors = self.hand.root_physx_view.get_link_incoming_joint_force()[:, self.finger_bodies]
+        if self.cfg.has_fingertip_contact_forces:
+            self.fingertip_force_sensors = self.hand.root_physx_view.get_link_incoming_joint_force()[:, self.finger_bodies]
         state = self._compute_states()
 
         observations = {"policy": obs, "critic": state}

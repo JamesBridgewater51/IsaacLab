@@ -12,16 +12,26 @@ Configuration for the O12 OmniHand from a converted MJCF model.
 import isaaclab.sim as sim_utils
 from isaaclab.actuators.actuator_cfg import ImplicitActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg
-from isaaclab.actuators import IdealPDActuatorCfg
 from scipy.spatial.transform import Rotation as R
+import os
 
-O12_HAND_USD_PATH = "/home/minghao/src/robotflow/IsaacLab/assets/o12_hand_description-main/urdf/o12_t1_right/o12_t1_right.usd"  # Placeholder path
-# O12_HAND_USD_PATH = "/home/minghao/src/robotflow/IsaacLab/assets/o12_hand_description_main_original/urdf/o12_t1_right/o12_t1_right.usd"  # Placeholder path
+O12_HAND_FIX_WRIST = False
+O12_HAND_INCLUDE_VEL_IN_OBS = False
+O12_HAND_HAS_VISION = True
+O12_HAND_HAS_FINGERTIP_FORCE_SENSOR = False
+
+# Get the path to IsaacLab directory by going up from current file location
+current_dir = os.path.dirname(os.path.abspath(__file__))
+isaaclab_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(current_dir))))
+
+if O12_HAND_FIX_WRIST:
+    O12_HAND_USD_PATH = os.path.join(isaaclab_dir, "assets", "o12_hand_description-main", "urdf", "o12_t1_right", "o12_t1_right.usd")
+else:
+    O12_HAND_USD_PATH = os.path.join(isaaclab_dir, "assets", "o12_hand_description-main", "urdf", "o12_t1_right_wrist_pitch", "o12_t1_right_wrist_pitch.usd")
 
 O12_HAND_WRIST_ROT = [90.0, 90.0, -15.0]  # extrinsic rotation around z,x,y axis, in degrees.
 rot = R.from_euler('zxy', O12_HAND_WRIST_ROT, degrees=True)
 O12_HAND_WRIST_ROT_QUAT = rot.as_quat(scalar_first=True)  # (w, x, y, z)
-O12_HAND_FIX_WRIST = False
 O12_HAND_INITIAL_STATE = {
     # Thumb joints
     "R_thumb_roll_joint": 0.0,
@@ -44,7 +54,7 @@ O12_HAND_INITIAL_STATE = {
 
 if not O12_HAND_FIX_WRIST:
     O12_HAND_INITIAL_STATE.update({
-        "R_wrist_pitch": 0.0,
+        "R_wrist_pitch_joint": 0.0,
     })
 
 O12_HAND_CFG = ArticulationCfg(
