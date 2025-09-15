@@ -114,7 +114,7 @@ class O12HandOpenAIEnvCfg(DirectRLEnvCfg):
     if object_name == "cube":
         usd_path = f"{ISAAC_NUCLEUS_DIR}/Props/Blocks/DexCube/dex_cube_instanceable.usd"
         # usd_path = f"assets/Blocks/DexCube/dex_cube_instanceable.usd"
-        object_scale = (1.2, 1.2, 1.2)
+        object_scale = (0.6,0.6, 0.6)
         visual_material = None
         goal_visual_material = None
         contact_debug_vis = True
