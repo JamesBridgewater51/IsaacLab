@@ -21,18 +21,93 @@ from isaaclab.assets import Articulation, RigidObject
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import TiledCamera, TiledCameraCfg
 from isaaclab.utils import configclass
-from isaaclab.utils.math import quat_apply
+from isaaclab.utils.math import quat_apply, quat_conjugate
 
 from isaaclab_tasks.direct.inhand_manipulation.inhand_manipulation_env import InHandManipulationEnv, unscale
 from isaaclab_tasks.direct.inhand_manipulation.inhand_manipulation_real_env import InHandManipulationRealEnv
 
 from isaaclab_tasks.direct.shadow_hand.feature_extractor import FeatureExtractor, FeatureExtractorCfg
-from isaaclab_tasks.direct.shadow_hand.shadow_hand_env_cfg import ShadowHandEnvCfg as DexHandEnvCfg
-from isaaclab_tasks.direct.shadow_hand.shadow_hand_env_cfg import ShadowHandVisionEnvCfg as DexHandEnvCfg
+# from isaaclab_tasks.direct.shadow_hand.shadow_hand_env_cfg import ShadowHandEnvCfg as DexHandEnvCfg
+# from isaaclab_tasks.direct.shadow_hand.shadow_hand_env_cfg import ShadowHandVisionEnvCfg as DexHandEnvCfg
 from isaaclab_tasks.direct.o12_hand.o12_hand_env_cfg import O12HandSim2RealEnvCfg as DexHandEnvCfg
 from cprint import cprint
 import datetime
 import os
+
+def _world_to_cam(points_world: torch.Tensor, cam_pos: torch.Tensor, cam_quat: torch.Tensor) -> torch.Tensor:
+    """
+    points_world: (B, M, 3)
+    cam_pos: (3,) or (B,3)
+    cam_quat: (4,) (wxyz) or (B,4)
+    returns points_cam: (B, M, 3)
+    """
+    B, M, _ = points_world.shape
+    # broadcast cam params
+    if cam_pos.dim() == 1:
+        cam_pos = cam_pos.unsqueeze(0).expand(B, -1)
+    if cam_quat.dim() == 1:
+        cam_quat = cam_quat.unsqueeze(0).expand(B, -1)
+
+    # world -> camera:
+    # p_cam = R_cw * (p_w - t_wc) where R_cw = conj(q_wc) as rotation operator
+    pw_minus_t = points_world - cam_pos[:, None, :]  # (B,M,3)
+    q_cw = quat_conjugate(cam_quat)                 # (B,4)
+    q_cw_expanded = q_cw[:, None, :].expand(-1, M, -1)  # (B,M,4)
+    p_cam = quat_apply(q_cw_expanded, pw_minus_t)    # (B,M,3)
+    return p_cam
+
+def _compute_intrinsics(f_mm: float, apr_w_mm: float, width_px: int, height_px: int):
+    """Return fx, fy, cx, cy (pixels) from USD pinhole camera params."""
+    fx = f_mm * (width_px  / apr_w_mm)
+    # derive vertical aperture based on aspect ratio
+    apr_h_mm = apr_w_mm * (height_px / width_px)
+    fy = f_mm * (height_px / apr_h_mm)
+    cx = (width_px  - 1) * 0.5
+    cy = (height_px - 1) * 0.5
+    return fx, fy, cx, cy
+
+def _project_and_visible(points_cam: torch.Tensor, fx: float, fy: float, cx: float, cy: float, W: int, H: int, convention: str = "world"):
+    """
+    points_cam: (B, M, 3) in camera coords
+    convention: "opengl", "ros", or "world"
+    returns visible_mask_per_env: (B,) where True if >= 2 points visible
+    """
+    B, M, _ = points_cam.shape
+    
+    # Extract coordinates based on convention
+    if convention == "opengl":
+        # OpenGL: forward axis: -Z, up axis: +Y
+        # For projection, we need positive depth, so negate Z
+        x = points_cam[..., 0]   # right
+        y = points_cam[..., 1]   # up
+        z = -points_cam[..., 2]  # depth (negate because forward is -Z)
+    elif convention == "ros":
+        # ROS: forward axis: +Z, up axis: -Y
+        x = points_cam[..., 0]   # right
+        y = -points_cam[..., 1]  # up (negate because up is -Y)
+        z = points_cam[..., 2]   # depth (positive forward)
+    elif convention == "world":
+        # World: forward axis: +X, up axis: +Z
+        # Remap: camera_right = -Y, camera_up = +Z, camera_forward = +X
+        x = -points_cam[..., 1]  # right (camera x from world -y)
+        y = points_cam[..., 2]   # up (camera y from world z)
+        z = points_cam[..., 0]   # depth (camera z from world x)
+    else:
+        raise ValueError(f"Unknown convention: {convention}. Must be 'opengl', 'ros', or 'world'")
+    
+    # Check if points are in front of camera
+    in_front = z > 1e-6
+
+    # Perspective projection
+    u = fx * (x / z) + cx
+    v = fy * (y / z) + cy
+
+    # Check if projected points are within image bounds
+    in_u = (u >= 0.0) & (u < W)
+    in_v = (v >= 0.0) & (v < H)
+    visible = in_front & in_u & in_v           # (B,M)
+    counts = visible.sum(dim=1)                # (B,)
+    return counts >= 2, (u, v, visible)
 
 
 CURRENT_TIME = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
@@ -40,7 +115,7 @@ CURRENT_TIME = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
 @configclass
 class DexHandVisionEnvCfg(DexHandEnvCfg):
     # scene
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1225, env_spacing=2.0, replicate_physics=True)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1225, env_spacing=2, replicate_physics=True)
 
     # camera
     tiled_camera: TiledCameraCfg = TiledCameraCfg(
@@ -48,7 +123,8 @@ class DexHandVisionEnvCfg(DexHandEnvCfg):
         # NOTE: 'convention' specifies camera frame convention, so 'pos' is unaffected by convention, 'rot' is affected.
         # NOTE: camera is positioned to look down upon hand-object system.
         # offset=TiledCameraCfg.OffsetCfg(pos=(0, -0.35, 1.0), rot=(0.7071, 0.0, 0.7071, 0.0), convention="world"), # for shadow hand.
-        offset=TiledCameraCfg.OffsetCfg(pos=(0, -0.1, 1.0), rot=(0.7071, 0.0, 0.7071, 0.0), convention="world"), # for o12 hand.
+        # FIXME
+        offset=TiledCameraCfg.OffsetCfg(pos=(0, -0.1, 0.85), rot=(0.7071, 0.0, 0.7071, 0.0), convention="world"), # for o12 hand.
         data_types=["rgb"],
         spawn=sim_utils.PinholeCameraCfg(
             focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(0.1, 20.0)
@@ -56,16 +132,37 @@ class DexHandVisionEnvCfg(DexHandEnvCfg):
         width=120,
         height=120,
     )
-    feature_extractor = FeatureExtractorCfg(train=True, load_checkpoint=False, input_modality="rgb_only", base_dir=os.path.join(os.path.dirname(os.path.dirname(__file__)), "o12_hand", CURRENT_TIME))
+    feature_extractor = FeatureExtractorCfg(train=True, save_data_to_file=True, load_checkpoint=False, input_modality="rgb_only", base_dir=os.path.join(os.path.dirname(os.path.dirname(__file__)), "o12_hand", CURRENT_TIME))
+    # feature_extractor = FeatureExtractorCfg(train=True, load_checkpoint=True, input_modality="rgb_only", base_dir=os.path.join(os.path.dirname(os.path.dirname(__file__)), "o12_hand", CURRENT_TIME))
 
 
 @configclass
 class DexHandVisionEnvPlayCfg(DexHandVisionEnvCfg):
     # scene
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=64, env_spacing=2.0, replicate_physics=True)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=64, env_spacing=0.5, replicate_physics=True)
     # inference for CNN
     feature_extractor = FeatureExtractorCfg(train=False, load_checkpoint=True, input_modality="rgb_only", base_dir = "")
 
+def kabsch_R(A, B):  # A,B: [N,3] centered keypoints
+    H = A.T @ B                         # [3,3]
+    U, S, Vt = torch.linalg.svd(H)
+    R = U @ torch.diag(torch.tensor([1,1, torch.sign(torch.linalg.det(U @ Vt))], device=A.device)) @ Vt
+    return R
+
+def keypoints_to_relquat(K_obj, K_goal, obj_center):
+    # K_obj: [B,8,3] world; K_goal: [B,8,3] world(=0+R_g*corners); obj_center: [B,3]
+    A = K_obj - obj_center.unsqueeze(1)   # center
+    B = K_goal                             # center at 0
+    R_rel = torch.stack([kabsch_R(A[i], B[i]) for i in range(A.shape[0])], dim=0)  # [B,3,3]
+    # 3x3 -> quat (w,x,y,z)
+    def rotmat_to_quat(R):
+        # 可用自带函数或写稳定版本
+        qw = torch.sqrt(torch.clamp(1.0 + torch.diagonal(R, dim1=1, dim2=2).sum(dim=1), min=1e-6)) / 2
+        qx = (R[:,2,1]-R[:,1,2])/(4*qw); qy = (R[:,0,2]-R[:,2,0])/(4*qw); qz = (R[:,1,0]-R[:,0,1])/(4*qw)
+        return torch.stack([qw,qx,qy,qz], dim=1)
+    q_rel = rotmat_to_quat(R_rel)
+    # 也可输出 6D 表示：R_rel[:,:2].reshape(B,6)
+    return q_rel
 
 class DexHandVisionEnv(InHandManipulationRealEnv):
     cfg: DexHandVisionEnvCfg
@@ -102,51 +199,85 @@ class DexHandVisionEnv(InHandManipulationRealEnv):
         light_cfg.func("/World/Light", light_cfg)
 
     def _compute_image_observations(self):
-        # default size of Nuclues server's cube is 0.06m
+        # 1) GT keypoints in world
         size = (2 * 0.03 * self.cfg.object_scale[0], 2 * 0.03 * self.cfg.object_scale[1], 2 * 0.03 * self.cfg.object_scale[2])
         compute_keypoints(pose=torch.cat((self.object_pos, self.object_rot), dim=1), size=size, out=self.gt_keypoints)
 
+        # 2) Build GT pose target for CNN (pos + 8*3 keypoints)
         object_pose = torch.cat([self.object_pos, self.gt_keypoints.view(-1, 24)], dim=-1)
 
-        # train CNN to regress on keypoint positions
+        # 3) Compute per-env visibility mask from camera frustum (>= 2 corners visible)
+        # 3.1) Camera intrinsics from cfg
+        W = int(self.cfg.tiled_camera.width)
+        H = int(self.cfg.tiled_camera.height)
+        f_mm = float(self.cfg.tiled_camera.spawn.focal_length)
+        apr_w_mm = float(self.cfg.tiled_camera.spawn.horizontal_aperture)
+        fx, fy, cx, cy = _compute_intrinsics(f_mm, apr_w_mm, W, H)
+
+        # 3.2) Camera pose (world) from env origins 
+        env_origins = self.scene.env_origins  # (B,3)
+        cam_off_pos = torch.tensor(self.cfg.tiled_camera.offset.pos, dtype=torch.float32, device=self.device)  # (3,)
+        cam_off_quat = torch.tensor(self.cfg.tiled_camera.offset.rot, dtype=torch.float32, device=self.device)  # (4,) (wxyz)
+        cam_quat = cam_off_quat.expand(self.num_envs, -1)     # (B,4)
+
+        # 3.3) Transform GT keypoints from world to camera coords
+        points_cam = _world_to_cam(self.gt_keypoints, cam_off_pos, cam_quat)  # (B,8,3)
+
+        # 3.4) Project and test visibility
+        convention = self.cfg.tiled_camera.offset.convention
+        valid_mask, (u, v, visible) = _project_and_visible(points_cam, fx, fy, cx, cy, W, H, convention=convention)  # (B,)
+
+        VIS_IMG_ONLINE = False
+        if VIS_IMG_ONLINE:
+            import math, cv2, torchvision
+            import numpy as np
+            image = self._tiled_camera.data.output["rgb"] / 255.0  # (H,W,3) uint8
+            tensor = image.permute(0,3,1,2)
+            n = image.shape[0]
+            cols = int(math.ceil(math.sqrt(n)))
+            grid = torchvision.utils.make_grid(tensor, nrow=cols, padding=2)
+            grid = grid.permute(1,2,0).cpu().numpy()
+            grid_bgr = cv2.cvtColor((grid*255).astype(np.uint8), cv2.COLOR_RGB2BGR)
+            cv2.imshow("tiled_camera", grid_bgr)
+            cv2.imwrite("./dexhand_vision_env_o12_hand.png", grid_bgr)
+            cv2.waitKey(1)
+
+        # 4) Train CNN with visibility mask
         pose_loss, embeddings = self.feature_extractor.step(
             rgb_img=self._tiled_camera.data.output["rgb"],
             depth_img=None,
             gt_pose=object_pose,
+            mask=valid_mask,
         )
-
         self.embeddings = embeddings.clone().detach()
+
+        # 5) Goal keypoints and relative quaternion target
         compute_keypoints(
-            pose=torch.cat((torch.zeros_like(self.goal_pos), self.goal_rot), dim=-1), size=size, out=self.goal_keypoints
+            pose=torch.cat((torch.zeros_like(self.goal_pos), self.goal_rot), dim=1), size=size, out=self.goal_keypoints
         )
+        rel_quat = keypoints_to_relquat(self.gt_keypoints, self.goal_keypoints, self.object_pos)  # [B,4]
 
-        obs = torch.cat(
-            (
-                self.embeddings,
-                self.goal_keypoints.view(-1, 24),
-            ),
-            dim=-1,
-        )
-
-        # log pose loss from CNN training
+        # 6) Logging
         if "log" not in self.extras:
             self.extras["log"] = dict()
+        nv = int(valid_mask.sum().item())
+        vr = float(nv / self.num_envs)
         self.extras["log"]["pose_loss"] = pose_loss
+        self.extras["log"]["num_valid_envs"] = nv
+        self.extras["log"]["valid_ratio"] = vr
 
-        return obs
+        # 7) Return image-based observation for policy
+        return rel_quat
 
     def _compute_proprio_observations(self):
         """Proprioception observations from physics."""
         # default size of Nuclues server's cube is 0.06m
         size = (2 * 0.03 * self.cfg.object_scale[0], 2 * 0.03 * self.cfg.object_scale[1], 2 * 0.03 * self.cfg.object_scale[2])
-        # NOTE: use zeor-positioned cube's keypoints as goal keypoints.
+        # NOTE: use zero-positioned cube's keypoints as goal keypoints.
         zero_pos_goal_keypoints = self.goal_keypoints.clone()
         compute_keypoints(pose=torch.cat((torch.zeros_like(self.goal_pos), self.goal_rot), dim=1), size=size, out=zero_pos_goal_keypoints)
-        # Base observation components
-        obs_components = [
-            # hand joint positions (normalized)
-            unscale(self.hand_dof_pos, self.hand_dof_lower_limits, self.hand_dof_upper_limits),
-        ]
+   
+        obs_components = []
         
         # Add hand joint velocities if enabled
         if self.cfg.include_vel_in_obs:
@@ -154,11 +285,12 @@ class DexHandVisionEnv(InHandManipulationRealEnv):
         
         # Add remaining components
         obs_components.extend([
-            # goal position
-            self.in_hand_pos,
+            # current object position
+            self.object_pos,
             # fingertip positions and orientations
             self.fingertip_pos.view(self.num_envs, self.num_fingertips * 3),
-            self.fingertip_rot.view(self.num_envs, self.num_fingertips * 4),
+            # NOTE: vanilla OpenAI Rl algorithm dont' include fingertip orientations
+            # self.fingertip_rot.view(self.num_envs, self.num_fingertips * 4),
         ])
         
         # Add fingertip velocities if enabled
@@ -174,8 +306,8 @@ class DexHandVisionEnv(InHandManipulationRealEnv):
     def _compute_states(self):
         """Asymmetric states for the critic."""
         sim_states = self.compute_full_state()
-        state = torch.cat((sim_states, self.embeddings), dim=-1)
-        return state
+        # NOTE: training is viable without vision-based embeddings, and vision-CNN has no effect on critic training dynamics.
+        return sim_states
 
     def _get_observations(self) -> dict:
         # proprioception observations

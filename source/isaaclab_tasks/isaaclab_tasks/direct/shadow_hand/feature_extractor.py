@@ -7,6 +7,7 @@ import glob
 import os
 import torch
 import torch.nn as nn
+import numpy as np
 import torchvision
 
 from isaaclab.sensors import save_images_to_file
@@ -25,6 +26,9 @@ class FeatureExtractorCfg:
 
     write_image_to_file: bool = False
     """If True, the images from the camera sensor are written to file. Default is False."""
+
+    save_data_to_file: bool = False
+    """If True, the data from the environment is written to file. Default is False."""
 
     input_modality: str = "rgb_depth"
     """Input modality type. Options: 'rgb_only', 'depth_only', 'rgb_depth'. Default is 'rgb_depth'."""
@@ -117,6 +121,10 @@ class FeatureExtractor:
         if not os.path.exists(self.log_dir):
             os.makedirs(self.log_dir)
 
+        # Initialize TensorBoardX
+        from tensorboardX import SummaryWriter
+        self.tb_writer = SummaryWriter(log_dir=self.log_dir)
+
         if self.cfg.load_checkpoint:
             list_of_files = glob.glob(self.log_dir + "/*.pth")
             latest_file = max(list_of_files, key=os.path.getctime)
@@ -125,11 +133,19 @@ class FeatureExtractor:
             self.feature_extractor.load_state_dict(torch.load(checkpoint, weights_only=True))
 
         if self.cfg.train:
-            self.optimizer = torch.optim.Adam(self.feature_extractor.parameters(), lr=1e-4)
-            self.l2_loss = nn.MSELoss()
+            self.optimizer = torch.optim.Adam(self.feature_extractor.parameters(), lr=1e-5)
+            self.l2_loss = nn.MSELoss(reduction='none')
             self.feature_extractor.train()
         else:
             self.feature_extractor.eval()
+        
+        if self.cfg.save_data_to_file:
+            assert self.cfg.train, "Data saving requires training mode."
+            self.data_dir = os.path.join(self.cfg.base_dir, "data")
+            if not os.path.exists(self.data_dir):
+                os.makedirs(self.data_dir)
+            self._img_array = []
+            self._objpose_array = []
 
     def _preprocess_images(
         self, rgb_img: torch.Tensor = None, depth_img: torch.Tensor = None
@@ -175,9 +191,35 @@ class FeatureExtractor:
         if depth_img is not None:
             depth_path = os.path.join(self.cfg.base_dir, f"depth_{self.cfg.input_modality}_step_{self.step_count:06d}.png")
             save_images_to_file(depth_img, depth_path)
+        # visualize the image using cv2 quickly
+        import cv2, math, torch, torchvision
+
+        # Show all RGB images in a grid (in order)
+        if rgb_img is not None:
+            # rgb_img expected shape: (N, H, W, 3), values in [0,1]
+            imgs = rgb_img.clamp(0, 1)
+
+            n = imgs.shape[0]
+            if n > 0:
+                # Compute grid size (square-ish)
+                cols = int(math.ceil(math.sqrt(n)))
+                # Use make_grid (expects N,C,H,W)
+                tensor = imgs.permute(0, 3, 1, 2)  # (N,3,H,W)
+                grid = torchvision.utils.make_grid(tensor, nrow=cols, padding=2)  # (3,Hg,Wg)
+                grid = grid.permute(1, 2, 0).cpu().numpy()  # (Hg,Wg,3), still RGB
+
+                # Convert to BGR for OpenCV display
+                grid_bgr = cv2.cvtColor((grid * 255).astype("uint8"), cv2.COLOR_RGB2BGR)
+                cv2.imshow("rgb_grid", grid_bgr)
+                cv2.waitKey(1)
 
     def step(
-        self, rgb_img: torch.Tensor = None, depth_img: torch.Tensor = None, gt_pose: torch.Tensor = None
+        self, 
+        rgb_img: torch.Tensor | None = None, 
+        depth_img: torch.Tensor | None = None, 
+        gt_pose: torch.Tensor | None = None,
+        mask: torch.Tensor | None = None,
+        debug: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Extracts the features using the images and trains the model if the train flag is set to True.
 
@@ -195,23 +237,74 @@ class FeatureExtractor:
         if self.cfg.write_image_to_file:
             self._save_images((rgb_img/255.0), depth_img)
 
+        # Log image to TensorBoard
+        if self.step_count % 100 == 0 and rgb_img is not None:
+            import math
+            # Normalize to [0,1] if needed and build grid
+            imgs = (rgb_img / 255.0).clamp(0, 1)
+            n = imgs.shape[0]
+            if n > 0:
+                cols = int(math.ceil(math.sqrt(n)))
+                tensor = imgs.permute(0, 3, 1, 2)  # (N,3,H,W)
+                grid = torchvision.utils.make_grid(tensor, nrow=cols, padding=2)  # (3,Hg,Wg)
+            self.tb_writer.add_image("rgb_image", grid.detach().cpu(), global_step=self.step_count)
+
+        if self.cfg.save_data_to_file:
+            if mask is None:
+                mask = torch.ones((img_input.shape[0],), dtype=torch.bool, device=img_input.device)
+            self._img_array.append(img_input[mask].cpu().numpy())
+            self._objpose_array.append(gt_pose[mask].cpu().numpy())
+            if self.step_count % 50_000 == 0 and self.step_count > 0:
+                img_array_np = np.concatenate(self._img_array, axis=0)
+                objpose_array_np = np.concatenate(self._objpose_array, axis=0)
+                np.savez_compressed(
+                    os.path.join(self.data_dir, f"data_step_{self.step_count:06d}.npz"),
+                    images=img_array_np,
+                    objposes=objpose_array_np,
+                )
+                print(f"[INFO] Saved data at step {self.step_count} to {self.data_dir}")
+
         if self.cfg.train:
             with torch.enable_grad():
                 with torch.inference_mode(False):
                     self.optimizer.zero_grad()
 
                     predicted_pose = self.feature_extractor(img_input)
-                    pose_loss = self.l2_loss(predicted_pose, gt_pose.clone()) * 100
+                    # pose_loss = self.l2_loss(predicted_pose, gt_pose.clone()) * 100
 
-                    pose_loss.backward()
-                    self.optimizer.step()
+                    per_elem = self.l2_loss(predicted_pose, gt_pose.clone())   # (N,27)
+                    per_sample = per_elem.mean(dim=1)                  # (N,)
 
-                    if self.step_count % 50000 == 0:
+                    if mask is None:
+                        mask = torch.ones_like(per_sample, dtype=torch.bool, device=per_sample.device)
+
+                    valid = mask.to(dtype=per_sample.dtype)
+                    valid_count = int(valid.sum().item())
+
+                    if valid_count == 0:
+                        # nothing valid this step — skip optimizer step
+                        pose_loss = torch.tensor(0.0, device=per_sample.device, requires_grad=False)
+                        if debug and (self.step_count % 100 == 0):
+                            print(f"[DEBUG] step={self.step_count} | valid=0 | skipping optimizer step")
+                    else:
+                        # masked mean loss * 100 (keep your original scaling)
+                        pose_loss = ((per_sample * valid).sum() / valid.sum()) * 100.0
+                        pose_loss.backward()
+                        self.optimizer.step()
+                        self.tb_writer.add_scalar("pose_loss", pose_loss.item(), self.step_count)
+                        self.tb_writer.add_scalar("valid_count", valid_count, self.step_count)
+
+                    if self.step_count % 5000 == 0 and valid_count > 0:
                         torch.save(
                             self.feature_extractor.state_dict(),
                             os.path.join(self.log_dir, f"cnn_{self.cfg.input_modality}_{self.step_count}_{pose_loss.detach().cpu().numpy()}.pth"),
                         )
 
+                    if debug and (self.step_count % 200 == 0):
+                        print(
+                            f"[DEBUG] step={self.step_count} | valid={valid_count} / {mask.numel()} "
+                            f"| loss(valid)={pose_loss.item():.4f}"
+                        )
                     self.step_count += 1
 
                     return pose_loss, predicted_pose

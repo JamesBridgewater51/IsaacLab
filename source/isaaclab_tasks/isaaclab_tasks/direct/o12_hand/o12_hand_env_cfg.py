@@ -16,8 +16,6 @@ import isaaclab.envs.mdp as mdp
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, RigidObjectCfg
 from isaaclab.envs import DirectRLEnvCfg
-from isaaclab.managers import EventTermCfg as EventTerm
-from isaaclab.managers import SceneEntityCfg
 from isaaclab.markers import VisualizationMarkersCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import PhysxCfg, SimulationCfg
@@ -29,13 +27,12 @@ from ..shadow_hand.shadow_hand_env_cfg import EventCfg, OBJ_ATTR_DICT
 from isaaclab.sensors import ContactSensorCfg
 import os
 
-
 @configclass
 class O12HandOpenAIEnvCfg(DirectRLEnvCfg):
     """Base configuration for the O12 OmniHand in-hand manipulation task."""
 
     # -- Environment settings
-    decimation = 2
+    decimation = 4
     episode_length_s = 10.0
     dof_hand = 12
     num_fingertips = 5
@@ -49,13 +46,13 @@ class O12HandOpenAIEnvCfg(DirectRLEnvCfg):
     # -- Simulation settings
     sim: SimulationCfg = SimulationCfg(
         dt=1 / 120,
-        render_interval=decimation,
+        render_interval=1,
         physics_material=RigidBodyMaterialCfg(static_friction=1.0, dynamic_friction=1.0),
         physx=PhysxCfg(bounce_threshold_velocity=0.2),
     )
 
     # -- Scene settings
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1, env_spacing=0.75, replicate_physics=True)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1, env_spacing=0.75, replicate_physics=False)
 
     # -- Robot settings
     robot_cfg: ArticulationCfg = O12_HAND_CFG.replace(prim_path="/World/envs/env_.*/Robot")
