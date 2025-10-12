@@ -56,6 +56,27 @@ def _world_to_cam(points_world: torch.Tensor, cam_pos: torch.Tensor, cam_quat: t
     p_cam = quat_apply(q_cw_expanded, pw_minus_t)    # (B,M,3)
     return p_cam
 
+def _cam_to_world(points_cam: torch.Tensor, cam_pos: torch.Tensor, cam_quat: torch.Tensor) -> torch.Tensor:
+    """
+    points_cam: (B, M, 3)
+    cam_pos: (3,) or (B,3)
+    cam_quat: (4,) (wxyz) or (B,4)
+    returns points_world: (B, M, 3)
+    """
+    B, M, _ = points_cam.shape
+    # broadcast cam params
+    if cam_pos.dim() == 1:
+        cam_pos = cam_pos.unsqueeze(0).expand(B, -1)
+    if cam_quat.dim() == 1:
+        cam_quat = cam_quat.unsqueeze(0).expand(B, -1)
+
+    # camera -> world:
+    # p_w = R_wc * p_cam + t_wc where R_wc = q_wc as rotation operator
+    q_wc_expanded = cam_quat[:, None, :].expand(-1, M, -1)  # (B,M,4)
+    rotated = quat_apply(q_wc_expanded, points_cam)          # (B,M,3)
+    p_world = rotated + cam_pos[:, None, :]                  # (B,M,3)
+    return p_world
+
 def _compute_intrinsics(f_mm: float, apr_w_mm: float, width_px: int, height_px: int):
     """Return fx, fy, cx, cy (pixels) from USD pinhole camera params."""
     fx = f_mm * (width_px  / apr_w_mm)
@@ -243,13 +264,18 @@ class DexHandVisionEnv(InHandManipulationRealEnv):
             cv2.waitKey(1)
 
         # 4) Train CNN with visibility mask
-        pose_loss, embeddings = self.feature_extractor.step(
+        object_pose = _world_to_cam(object_pose.reshape(-1, 9, 3), cam_off_pos, cam_quat)  # (B,9,3)
+        object_pose = object_pose.reshape(-1, 27)  # (B,27)
+        pose_loss, pred_obj_pose = self.feature_extractor.step(
             rgb_img=self._tiled_camera.data.output["rgb"],
             depth_img=None,
             gt_pose=object_pose,
             mask=valid_mask,
         )
-        self.embeddings = embeddings.clone().detach()
+        pred_obj_pose = pred_obj_pose.reshape(-1, 9, 3)  # (B,9,3)
+        pred_obj_pose = _cam_to_world(pred_obj_pose, cam_off_pos, cam_quat)  # (B,9,3)
+        pred_obj_pose = pred_obj_pose.reshape(-1, 27)  # (B,27)
+        self.embeddings = pred_obj_pose.clone().detach()
 
         # 5) Goal keypoints and relative quaternion target
         compute_keypoints(

@@ -310,4 +310,4 @@ class FeatureExtractor:
                     return pose_loss, predicted_pose
         else:
             predicted_pose = self.feature_extractor(img_input)
-            return None, predicted_pose
+            return torch.tensor(0.0).to(predicted_pose.device), predicted_pose
