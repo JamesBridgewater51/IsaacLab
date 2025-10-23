@@ -128,7 +128,7 @@ def _project_and_visible(points_cam: torch.Tensor, fx: float, fy: float, cx: flo
     in_v = (v >= 0.0) & (v < H)
     visible = in_front & in_u & in_v           # (B,M)
     counts = visible.sum(dim=1)                # (B,)
-    return counts >= 2, (u, v, visible)
+    return counts >= 8, (u, v, visible)
 
 
 CURRENT_TIME = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
