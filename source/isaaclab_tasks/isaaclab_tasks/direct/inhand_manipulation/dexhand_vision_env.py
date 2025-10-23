@@ -248,6 +248,10 @@ class DexHandVisionEnv(InHandManipulationRealEnv):
         convention = self.cfg.tiled_camera.offset.convention
         valid_mask, (u, v, visible) = _project_and_visible(points_cam, fx, fy, cx, cy, W, H, convention=convention)  # (B,)
 
+        # NOTE: calling `sim.render()` here to ensure camera images are updated. not sure if this is necessary.
+        for i in range(10):
+            self.sim.render()
+
         VIS_IMG_ONLINE = False
         if VIS_IMG_ONLINE:
             import math, cv2, torchvision
@@ -260,8 +264,9 @@ class DexHandVisionEnv(InHandManipulationRealEnv):
             grid = grid.permute(1,2,0).cpu().numpy()
             grid_bgr = cv2.cvtColor((grid*255).astype(np.uint8), cv2.COLOR_RGB2BGR)
             cv2.imshow("tiled_camera", grid_bgr)
-            cv2.imwrite("./dexhand_vision_env_o12_hand.png", grid_bgr)
-            cv2.waitKey(1)
+            if self._sim_step_counter % 12 == 0:
+                cv2.imwrite(f"./dexhand_vision_env_o12_hand_{self._sim_step_counter // 12}.png", grid_bgr)
+            cv2.waitKey(2000)
 
         # 4) Train CNN with visibility mask
         object_pose = _world_to_cam(object_pose.reshape(-1, 9, 3), cam_off_pos, cam_quat)  # (B,9,3)
