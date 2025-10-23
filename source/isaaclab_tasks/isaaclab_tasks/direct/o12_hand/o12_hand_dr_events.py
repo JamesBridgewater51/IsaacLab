@@ -175,86 +175,6 @@ def randomize_distractors(
                     )
                 env._author_trs(xf, translate=(x, y, z), rotate_xyz_deg=rot, scale=(s, s, s))
 
-def randomize_camera(
-    env: ManagerBasedEnv,
-    env_ids: torch.Tensor,
-    *,
-    pos_jitter: Tuple[float, float, float] | None = None,
-    yaw_deg: float | None = None,
-    pitch_deg: float | None = None,
-    roll_deg: float | None = None,
-    fov_deg_range: Tuple[float, float] | None = None,
-    default_cam_pos: Tuple[float, float, float] | None = None,
-) -> None:
-    """Randomise the camera pose and field of view for each environment.
-
-    The camera is displaced from its nominal position by sampling
-    uniformly within ``±pos_jitter`` along each axis.  It is also
-    rotated around its local axes by sampling yaw, pitch and roll
-    within the specified limits.  Finally, the camera's focal length
-    is adjusted to achieve a random field of view within
-    ``fov_deg_range``.
-
-    Args:
-        env: The manager based environment instance.
-        env_ids: Iterable of environment indices to update.  If
-            ``None``, all environments are updated.
-        pos_jitter: Maximum absolute offset along (x, y, z) from the
-            nominal camera position.
-        yaw_deg: Maximum absolute yaw rotation (degrees).
-        pitch_deg: Maximum absolute pitch rotation (degrees).
-        roll_deg: Maximum absolute roll rotation (degrees).
-        fov_deg_range: Min and max field of view in degrees.
-        default_cam_pos: Nominal camera position used as the centre
-            of the jitter range.  The nominal orientation is taken
-            from the camera prim itself.
-    """
-    import math
-    import math
-    stage = omni.usd.get_context().get_stage()
-    if env_ids is None:
-        env_ids = range(env.scene.num_envs)
-    # Pull defaults from environment configuration if parameters are None
-    if pos_jitter is None:
-        pos_jitter = env.cfg.dr.cam_pos_jitter_xyz
-    if yaw_deg is None:
-        yaw_deg = env.cfg.dr.cam_yaw_deg
-    if pitch_deg is None:
-        pitch_deg = env.cfg.dr.cam_pitch_deg
-    if roll_deg is None:
-        roll_deg = env.cfg.dr.cam_roll_deg
-    if fov_deg_range is None:
-        fov_deg_range = env.cfg.dr.fov_deg_range
-    if default_cam_pos is None:
-        default_cam_pos = (0.0, -0.10, 0.85)
-    for i in env_ids:
-        cam_path = f"/World/envs/env_{i}/Camera"
-        prim = stage.GetPrimAtPath(cam_path)
-        if not prim or not prim.IsValid():
-            continue
-        # Sample position offset
-        jx, jy, jz = pos_jitter
-        px = default_cam_pos[0] + random.uniform(-jx, jx)
-        py = default_cam_pos[1] + random.uniform(-jy, jy)
-        pz = default_cam_pos[2] + random.uniform(-jz, jz)
-        # Sample rotations
-        yaw = random.uniform(-yaw_deg, yaw_deg)
-        pitch = random.uniform(-pitch_deg, pitch_deg)
-        roll = random.uniform(-roll_deg, roll_deg)
-        # Apply translation and rotation
-        xf = UsdGeom.Xformable(prim)
-        env._author_trs(xf, translate=(px, py, pz), rotate_xyz_deg=(pitch, yaw, roll), scale=(1.0, 1.0, 1.0))
-        # Update field of view by changing focal length
-        cam = UsdGeom.Camera(prim)
-        H = cam.GetHorizontalApertureAttr().Get()
-        if H is None or H <= 0:
-            # Use default from config if not set
-            H = 20.955
-        fov_deg = random.uniform(*fov_deg_range)
-        fov_rad = math.radians(fov_deg)
-        f_mm = float(H) / (2.0 * math.tan(0.5 * fov_rad))
-        cam.GetFocalLengthAttr().Set(f_mm)
-
 def randomize_lights(
     env,
     env_ids: torch.Tensor | None,
@@ -625,3 +545,17 @@ def randomize_material_materialpool(
     floor_root = "/World/ground"
     if stage.GetPrimAtPath(floor_root).IsValid():
         _assign_material(floor_root)
+    
+def randomize_camera(
+    env: "ManagerBasedEnv",
+    env_ids: "torch.Tensor",
+):
+    camera_prims = [omni.usd.get_prim_at_path(f"/World/envs/env_{i}/Camera") for i in env_ids.tolist()]
+    env.camera_randomizer(camera_prims=camera_prims)
+    
+def randomize_camera(
+    env: "ManagerBasedEnv",
+    env_ids: "torch.Tensor",
+):
+    camera_prims = [omni.usd.get_prim_at_path(f"/World/envs/env_{i}/Camera") for i in env_ids.tolist()]
+    env.camera_randomizer(camera_prims=camera_prims)

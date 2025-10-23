@@ -147,6 +147,7 @@ class DexHandVisionDREnv(DexHandVisionEnv):
         self._spawn_tables_for_all_envs()
         self._ensure_distractor_roots()
         self._ensure_light_roots()
+        self._ensure_camera_randomizer()
 
         self.event_manager = EventManager(self.cfg.dr.events, self)
 
@@ -194,6 +195,13 @@ class DexHandVisionDREnv(DexHandVisionEnv):
             if not stage.GetPrimAtPath(root_path):
                 UsdGeom.Xform.Define(stage, Sdf.Path(root_path))
             
+    def _ensure_camera_randomizer(self):
+        from .camera_randomizer import CameraRandomizer, CameraPresets
+        self.camera_randomizer = CameraRandomizer(
+            CameraPresets.o12_hand_camera("Camera", randomization_mode="combined"),
+            seed=607,
+        )
+        return
 
     def _ensure_light_roots(self):
         stage = omni.usd.get_context().get_stage()
@@ -208,50 +216,6 @@ class DexHandVisionDREnv(DexHandVisionEnv):
         attribute = prim.GetAttribute("inputs:intensity")
         if attribute:
             attribute.Set(0.0)
-
-    # --------------------------------------------------
-    # Image-path noise
-    # --------------------------------------------------
-    def _compute_image_observations(self):
-        rel_quat = super()._compute_image_observations()
-        if not self.cfg.dr.add_image_noise:
-            return rel_quat
-
-        buf = self._tiled_camera.data.output["rgb"]
-        if buf.dtype != torch.float32:
-            rgb = buf.float() / 255.0
-        else:
-            rgb = buf
-        rgb3 = rgb[..., :3]
-
-        if torch.rand(()) < self.cfg.dr.noise_prob:
-            mode = random.choice(["gauss", "poisson", "speckle", "blur"])
-            if mode == "gauss":
-                s0, s1 = self.cfg.dr.gaussian_sigma_range
-                sigma = random.uniform(s0, s1)
-                rgb3 = torch.clamp(rgb3 + sigma * torch.randn_like(rgb3), 0.0, 1.0)
-            elif mode == "poisson":
-                g0, g1 = self.cfg.dr.poisson_gain_range
-                gain = random.uniform(g0, g1)
-                rgb3 = torch.clamp(torch.poisson(torch.clamp(rgb3, 0, 1) * gain) / max(gain, 1e-6), 0.0, 1.0)
-            elif mode == "speckle":
-                a0, a1 = self.cfg.dr.speckle_scale_range
-                scale = random.uniform(a0, a1)
-                rgb3 = torch.clamp(rgb3 + rgb3 * scale * torch.randn_like(rgb3), 0.0, 1.0)
-            else:  # box blur
-                k = random.choice(self.cfg.dr.blur_kernel_choices)
-                B, H, W, C = rgb3.shape
-                x = rgb3.permute(0, 3, 1, 2)  # B,C,H,W
-                kernel = torch.ones((C, 1, k, k), device=x.device, dtype=x.dtype) / (k * k)
-                x = torch.nn.functional.conv2d(x, kernel, padding=k // 2, groups=C)
-                rgb3 = x.permute(0, 2, 3, 1)
-
-        if buf.dtype == torch.float32:
-            buf[..., :3] = rgb3
-        else:
-            buf[..., :3] = (rgb3 * 255.0).byte()
-        self._tiled_camera.data.output["rgb"] = buf
-        return rel_quat
 
     def _env_mesh_pattern(self, env_i: int, root_subpath: str) -> str:
         """Return a path pattern that matches meshes under an env-local root Xform.
