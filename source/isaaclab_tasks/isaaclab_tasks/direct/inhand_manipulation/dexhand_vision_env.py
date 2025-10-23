@@ -266,11 +266,15 @@ class DexHandVisionEnv(InHandManipulationRealEnv):
         # 4) Train CNN with visibility mask
         object_pose = _world_to_cam(object_pose.reshape(-1, 9, 3), cam_off_pos, cam_quat)  # (B,9,3)
         object_pose = object_pose.reshape(-1, 27)  # (B,27)
+        model_kwargs = {
+            "intrinsics": torch.tensor([fx, fy, cx, cy], dtype=torch.float32, device=self.device).unsqueeze(0).expand(self.num_envs, -1)  # (B,4)
+        }
         pose_loss, pred_obj_pose = self.feature_extractor.step(
             rgb_img=self._tiled_camera.data.output["rgb"],
             depth_img=None,
             gt_pose=object_pose,
             mask=valid_mask,
+            model_kwargs=model_kwargs,
         )
         pred_obj_pose = pred_obj_pose.reshape(-1, 9, 3)  # (B,9,3)
         pred_obj_pose = _cam_to_world(pred_obj_pose, cam_off_pos, cam_quat)  # (B,9,3)

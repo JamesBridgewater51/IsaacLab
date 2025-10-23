@@ -552,10 +552,3 @@ def randomize_camera(
 ):
     camera_prims = [omni.usd.get_prim_at_path(f"/World/envs/env_{i}/Camera") for i in env_ids.tolist()]
     env.camera_randomizer(camera_prims=camera_prims)
-    
-def randomize_camera(
-    env: "ManagerBasedEnv",
-    env_ids: "torch.Tensor",
-):
-    camera_prims = [omni.usd.get_prim_at_path(f"/World/envs/env_{i}/Camera") for i in env_ids.tolist()]
-    env.camera_randomizer(camera_prims=camera_prims)

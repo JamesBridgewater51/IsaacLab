@@ -36,6 +36,182 @@ class FeatureExtractorCfg:
     base_dir: str = ""
     "base dir"
 
+class IntrinsicsAwareFeatureExtractorNetwork(nn.Module):
+    """
+    Intrinsics-aware CNN to regress keypoint / vertex positions from image(s).
+    - Accepts variable image resolution (HxW).
+    - Uses camera intrinsics (fx, fy, cx, cy) per-sample for:
+        1) creating normalized coordinate channels (x_n, y_n) that get concatenated to image input
+        2) FiLM conditioning (gamma/beta) applied to conv features
+    - Supports input modalities: "rgb_only", "depth_only", "rgb_depth"
+    - Returns vector of length `output_dim` (default 27)
+    """
+    def __init__(self, input_modality: str = "rgb_depth", output_dim: int = 27, use_coord: bool = True, use_film: bool = True):
+        super().__init__()
+        self.input_modality = input_modality
+        self.use_coord = use_coord
+        self.use_film = use_film
+        self.output_dim = output_dim
+
+        # Determine base number of image channels
+        if input_modality == "rgb_only":
+            base_channels = 3
+        elif input_modality == "depth_only":
+            base_channels = 1
+        elif input_modality == "rgb_depth":
+            base_channels = 4
+        else:
+            raise ValueError(f"Unsupported input_modality: {input_modality}")
+
+        # If adding coordinate maps, they become extra channels (2)
+        coord_channels = 2 if self.use_coord else 0
+        in_ch = base_channels + coord_channels
+
+        # conv blocks: we'll use GroupNorm (resolution-agnostic)
+        # each block: Conv2d -> ReLU -> GroupNorm
+        def conv_block(in_c, out_c, kernel=3, stride=1, padding=1):
+            return nn.Sequential(
+                nn.Conv2d(in_c, out_c, kernel_size=kernel, stride=stride, padding=padding),
+                nn.ReLU(inplace=True),
+                nn.GroupNorm(num_groups=min(8, out_c), num_channels=out_c)
+            )
+
+        # We'll build a small backbone with strided convs to reduce resolution
+        self.conv1 = conv_block(in_ch, 16, kernel=6, stride=2, padding=0)   # similar receptive field to original
+        self.conv2 = conv_block(16, 32, kernel=4, stride=2, padding=0)
+        self.conv3 = conv_block(32, 64, kernel=4, stride=2, padding=0)
+        self.conv4 = conv_block(64, 128, kernel=3, stride=2, padding=0)
+
+        # Adaptive pool to get fixed-size embedding regardless of HxW
+        self.pool = nn.AdaptiveAvgPool2d(1)  # output shape (B, 128, 1, 1)
+
+        # FiLM conditioning MLPs (optional)
+        if self.use_film:
+            # intrinsics vector per sample: (fx, fy, cx, cy, img_w, img_h) or at least (fx,fy,cx,cy)
+            # We'll create one small MLP per block to produce gamma/beta per channel.
+            self.film_mlps = nn.ModuleList([
+                nn.Sequential(nn.Linear(6, 128), nn.ReLU(), nn.Linear(128, 16 * 2)),   # for conv1 -> 16 channels
+                nn.Sequential(nn.Linear(6, 128), nn.ReLU(), nn.Linear(128, 32 * 2)),   # conv2
+                nn.Sequential(nn.Linear(6, 128), nn.ReLU(), nn.Linear(128, 64 * 2)),   # conv3
+                nn.Sequential(nn.Linear(6, 128), nn.ReLU(), nn.Linear(128, 128 * 2)),  # conv4
+            ])
+        else:
+            self.film_mlps = None
+
+        # Final linear head
+        self.linear = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(128, self.output_dim)
+        )
+
+        # RGB normalization params (manual apply in forward)
+        self.register_buffer("rgb_mean", torch.tensor([0.485, 0.456, 0.406]).view(1,3,1,1))
+        self.register_buffer("rgb_std",  torch.tensor([0.229, 0.224, 0.225]).view(1,3,1,1))
+
+    def _apply_film(self, features: torch.Tensor, film_params: torch.Tensor):
+        """
+        Apply FiLM to feature map.
+        features: (B, C, H, W)
+        film_params: (B, C*2) -> [gamma, beta] per-channel
+        returns: modulated features
+        """
+        B, C, H, W = features.shape
+        gamma, beta = film_params.view(B, 2, C).split(1, dim=1)  # each is (B,1,C)
+        gamma = gamma.squeeze(1).view(B, C, 1, 1)
+        beta  = beta.squeeze(1).view(B, C, 1, 1)
+        return features * (1.0 + gamma) + beta
+
+    def forward(self, x: torch.Tensor, intrinsics: torch.Tensor):
+        """
+        x: image tensor, shape (B, H, W, C_in) OR (B, C_in, H, W). We'll accept both.
+           expected value range: either [0,1] floats or normalized already (we handle RGB normalization manually).
+        intrinsics: tensor shape (B, 4) or (B, 6):
+            format: [fx, fy, cx, cy]  OR [fx, fy, cx, cy, img_w, img_h]
+            If img_w/img_h omitted, they'll be taken from x.shape.
+        Returns: (B, output_dim)
+        """
+        # Accept both channel-last and channel-first
+        if x.ndim == 4 and x.shape[-1] in (1,3,4):  # channel-last
+            x = x.permute(0, 3, 1, 2).contiguous()
+        # now x is (B, C, H, W)
+        B, C, H, W = x.shape
+
+        # Ensure intrinsics shape is (B,6): [fx,fy,cx,cy,w,h]
+        if intrinsics.ndim == 2 and intrinsics.shape[1] == 4:
+            fx_fy_cx_cy = intrinsics
+            # append image width & height
+            wh = torch.tensor([float(W), float(H)], device=x.device, dtype=x.dtype).view(1,2).expand(B,2)
+            intr = torch.cat([fx_fy_cx_cy, wh], dim=1)
+        elif intrinsics.ndim == 2 and intrinsics.shape[1] == 6:
+            intr = intrinsics
+        else:
+            raise ValueError("intrinsics must be shape (B,4) or (B,6)")
+
+        # ---------- RGB normalization (manual) ----------
+        if self.input_modality in ["rgb_only", "rgb_depth"]:
+            # assume RGB channels are first 3 channels in x
+            # but if modality is rgb_depth, channel 4 is depth
+            # ensure float
+            if x.dtype != torch.float32:
+                x = x.float()
+            # normalize the first 3 channels
+            x_rgb = x[:, 0:3, :, :]
+            x[:, 0:3, :, :] = (x_rgb - self.rgb_mean) / self.rgb_std
+
+        # ---------- build coord maps and concat ----------
+        if self.use_coord:
+            # compute per-sample coordinate maps (x_n, y_n) using intrinsics
+            # shape: (B, 2, H, W)
+            device = x.device
+            dtype = x.dtype
+
+            # create base u,v grids (pixel centers)
+            # coords are same for all batch if W,H same; but cx and cy differ per sample so we compute per-sample
+            u = torch.linspace(0, W-1, W, device=device, dtype=dtype)
+            v = torch.linspace(0, H-1, H, device=device, dtype=dtype)
+            grid_u, grid_v = torch.meshgrid(u, v, indexing='xy')  # grid_u shape (W,H) because indexing='xy' returns y over first dim
+
+            grid_u = grid_u.unsqueeze(0).unsqueeze(0).expand(B, -1, -1, -1)  # (B,1,H,W)
+            grid_v = grid_v.unsqueeze(0).unsqueeze(0).expand(B, -1, -1, -1)
+
+            fx = intr[:, 0].view(B,1,1,1)
+            fy = intr[:, 1].view(B,1,1,1)
+            cx = intr[:, 2].view(B,1,1,1)
+            cy = intr[:, 3].view(B,1,1,1)
+
+            x_n = (grid_u - cx) / fx  # (B,1,H,W)
+            y_n = (grid_v - cy) / fy  # (B,1,H,W)
+
+            coord_maps = torch.cat([x_n, y_n], dim=1)  # (B,2,H,W)
+            # concatenate to input
+            x = torch.cat([x, coord_maps], dim=1)
+
+        # ---------- forward through conv blocks with optional FiLM ----------
+        # conv1
+        f1 = self.conv1(x)  # (B,16, H1, W1)
+        if self.use_film:
+            film1 = self.film_mlps[0](intr)   # (B, 16*2)
+            f1 = self._apply_film(f1, film1)
+
+        f2 = self.conv2(f1)
+        if self.use_film:
+            film2 = self.film_mlps[1](intr)
+            f2 = self._apply_film(f2, film2)
+
+        f3 = self.conv3(f2)
+        if self.use_film:
+            film3 = self.film_mlps[2](intr)
+            f3 = self._apply_film(f3, film3)
+
+        f4 = self.conv4(f3)
+        if self.use_film:
+            film4 = self.film_mlps[3](intr)
+            f4 = self._apply_film(f4, film4)
+
+        pooled = self.pool(f4)           # (B,128,1,1)
+        out = self.linear(pooled)        # (B, output_dim)
+        return out
+
 
 class FeatureExtractorNetwork(nn.Module):
     """CNN architecture used to regress keypoint positions of the in-hand cube from image data."""
@@ -113,7 +289,7 @@ class FeatureExtractor:
         self.device = device
 
         # Feature extractor model
-        self.feature_extractor = FeatureExtractorNetwork(input_modality=cfg.input_modality)
+        self.feature_extractor = IntrinsicsAwareFeatureExtractorNetwork(input_modality=cfg.input_modality)
         self.feature_extractor.to(self.device)
 
         self.step_count = 0
@@ -220,6 +396,8 @@ class FeatureExtractor:
         gt_pose: torch.Tensor | None = None,
         mask: torch.Tensor | None = None,
         debug: bool = False,
+        model_kwargs: dict = {},
+        model_kwargs: dict = {},
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Extracts the features using the images and trains the model if the train flag is set to True.
 
@@ -269,7 +447,7 @@ class FeatureExtractor:
                 with torch.inference_mode(False):
                     self.optimizer.zero_grad()
 
-                    predicted_pose = self.feature_extractor(img_input)
+                    predicted_pose = self.feature_extractor(img_input, **model_kwargs)
                     # pose_loss = self.l2_loss(predicted_pose, gt_pose.clone()) * 100
 
                     per_elem = self.l2_loss(predicted_pose, gt_pose.clone())   # (N,27)
@@ -294,7 +472,7 @@ class FeatureExtractor:
                         self.tb_writer.add_scalar("pose_loss", pose_loss.item(), self.step_count)
                         self.tb_writer.add_scalar("valid_count", valid_count, self.step_count)
 
-                    if self.step_count % 5000 == 0 and valid_count > 0:
+                    if self.step_count % 1000 == 0 and valid_count > 0:
                         torch.save(
                             self.feature_extractor.state_dict(),
                             os.path.join(self.log_dir, f"cnn_{self.cfg.input_modality}_{self.step_count}_{pose_loss.detach().cpu().numpy()}.pth"),
@@ -309,5 +487,10 @@ class FeatureExtractor:
 
                     return pose_loss, predicted_pose
         else:
-            predicted_pose = self.feature_extractor(img_input)
-            return torch.tensor(0.0).to(predicted_pose.device), predicted_pose
+            predicted_pose = self.feature_extractor(img_input, **model_kwargs)
+            if gt_pose is not None:
+                pose_loss = nn.MSELoss()(predicted_pose, gt_pose.clone()).mean()
+            else:
+                pose_loss = torch.tensor(0.0).to(predicted_pose.device)
+
+            return pose_loss, predicted_pose
