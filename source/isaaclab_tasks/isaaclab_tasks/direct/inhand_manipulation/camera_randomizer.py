@@ -1063,7 +1063,7 @@ class CameraPresets:
                 focal_length_range=CameraProperties.FOCAL_NORMAL,
                 horizontal_aperture_range=CameraProperties.APERTURE_NORMAL,
                 focus_distance_range=CameraProperties.FOCUS_MEDIUM,
-                clipping_range=CameraProperties.CLIPPING_NORMAL,
+                clipping_range=CameraProperties.CLIPPING_CLOSE,
                 distribution="uniform",
                 enabled=True,
             ),

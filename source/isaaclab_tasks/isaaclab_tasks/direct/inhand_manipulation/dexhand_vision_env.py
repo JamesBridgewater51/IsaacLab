@@ -153,7 +153,7 @@ class DexHandVisionEnvCfg(DexHandEnvCfg):
         width=120,
         height=120,
     )
-    feature_extractor = FeatureExtractorCfg(train=False, save_data_to_file=False, load_checkpoint=True, input_modality="rgb_only", base_dir=os.path.join(os.path.dirname(os.path.dirname(__file__)), "o12_hand", CURRENT_TIME))
+    feature_extractor = FeatureExtractorCfg(train=False, save_data_to_file=False, load_checkpoint=False, input_modality="rgb_only", base_dir=os.path.join(os.path.dirname(os.path.dirname(__file__)), "o12_hand", CURRENT_TIME))
     # feature_extractor = FeatureExtractorCfg(train=True, load_checkpoint=True, input_modality="rgb_only", base_dir=os.path.join(os.path.dirname(os.path.dirname(__file__)), "o12_hand", CURRENT_TIME))
 
 
@@ -266,7 +266,7 @@ class DexHandVisionEnv(InHandManipulationRealEnv):
             cv2.imshow("tiled_camera", grid_bgr)
             if self._sim_step_counter % 12 == 0:
                 cv2.imwrite(f"./dexhand_vision_env_o12_hand_{self._sim_step_counter // 12}.png", grid_bgr)
-            cv2.waitKey(2000)
+            cv2.waitKey(2)
 
         # 4) Train CNN with visibility mask
         object_pose = _world_to_cam(object_pose.reshape(-1, 9, 3), cam_off_pos, cam_quat)  # (B,9,3)
@@ -274,6 +274,7 @@ class DexHandVisionEnv(InHandManipulationRealEnv):
         model_kwargs = {
             "intrinsics": torch.tensor([fx, fy, cx, cy], dtype=torch.float32, device=self.device).unsqueeze(0).expand(self.num_envs, -1)  # (B,4)
         }
+        
         pose_loss, pred_obj_pose = self.feature_extractor.step(
             rgb_img=self._tiled_camera.data.output["rgb"],
             depth_img=None,

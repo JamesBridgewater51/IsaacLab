@@ -397,7 +397,6 @@ class FeatureExtractor:
         mask: torch.Tensor | None = None,
         debug: bool = False,
         model_kwargs: dict = {},
-        model_kwargs: dict = {},
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Extracts the features using the images and trains the model if the train flag is set to True.
 

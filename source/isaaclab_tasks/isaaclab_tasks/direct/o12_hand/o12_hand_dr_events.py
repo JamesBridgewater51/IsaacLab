@@ -527,16 +527,16 @@ def randomize_material_materialpool(
     # ---- iterate environments ----
     for i in map(int, env_ids):
         table_root = f"/World/envs/env_{i}/Table"
-        robot_root = f"/World/envs/env_{i}/Robot"
+        # robot_root = f"/World/envs/env_{i}/Robot"
         dis_root = f"/World/envs/env_{i}/distractors"
 
-        root_prim = stage.GetPrimAtPath(robot_root)
-        assert root_prim.IsValid(), "robot root not found"
+        # root_prim = stage.GetPrimAtPath(robot_root)
+        # assert root_prim.IsValid(), "robot root not found"
 
         if stage.GetPrimAtPath(table_root).IsValid():
             _assign_material(table_root)
-        if stage.GetPrimAtPath(robot_root).IsValid():
-            _assign_material(robot_root, use_uniform_color=True)
+        # if stage.GetPrimAtPath(robot_root).IsValid():
+        #     _assign_material(robot_root, use_uniform_color=True)
         if stage.GetPrimAtPath(dis_root).IsValid():
             for mesh_path in _list_mesh_paths(dis_root):
                 _assign_material(mesh_path)

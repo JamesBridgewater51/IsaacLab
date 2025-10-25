@@ -97,11 +97,11 @@ class DRCfg:
         ),
         # Randomise camera pose and FOV on reset.  Parameters are read
         # from the configuration if omitted.
-        # "camera": EventTermCfg(
-        #     func=randomize_camera,
-        #     mode="reset",
-        #     params={},
-        # ),
+        "camera": EventTermCfg(
+            func=randomize_camera,
+            mode="reset",
+            params={},
+        ),
         # Randomise lights on reset.  Defaults are taken from the
         # configuration.
         "lights": EventTermCfg(
