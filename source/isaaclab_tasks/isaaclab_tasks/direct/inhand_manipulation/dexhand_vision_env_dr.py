@@ -19,12 +19,13 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 import isaaclab.envs.mdp as mdp
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils.assets import NVIDIA_NUCLEUS_DIR
+from .dexhand_vision_env import _project_and_visible, _cam_to_world, compute_keypoints, world_to_cam_batch, keypoints_to_relquat
+from .dexhand_vision_env import DexHandEnvCfg, DexHandVisionEnv, DexHandVisionEnvCfg
+import numpy as np
+import cv2
+import torchvision
 
 from pxr import UsdGeom, Usd, Gf, Sdf
-
-# base env
-from .dexhand_vision_env import DexHandVisionEnv, DexHandVisionEnvCfg  # noqa: F401
-
 
 # ---------------------------------------------------------------------
 # Config
@@ -161,7 +162,7 @@ class DexHandVisionDREnv(DexHandVisionEnv):
         ]
 
         # reset all at beginnings.
-        # self._reset_idx(torch.arange(self.num_envs, device=self.device))
+        self._reset_idx(torch.arange(self.num_envs, device=self.device))
 
     # --------------------------------------------------
     # Scene additions / table spawn
@@ -296,3 +297,184 @@ class DexHandVisionDREnv(DexHandVisionEnv):
         op.Set(m)
         xformable.SetXformOpOrder([], resetXformStack=True)
     
+    def _compute_image_observations(self):
+        
+        self._compute_intermediate_values()
+
+        # 1) GT keypoints in world
+        size = (2 * 0.03 * self.cfg.object_scale[0], 2 * 0.03 * self.cfg.object_scale[1], 2 * 0.03 * self.cfg.object_scale[2])
+        compute_keypoints(pose=torch.cat((self.object_pos, self.object_rot), dim=1), size=size, out=self.gt_keypoints)
+
+        # 2) Build GT pose target for CNN (pos + 8*3 keypoints)
+        object_pose = torch.cat([self.object_pos, self.gt_keypoints.view(-1, 24)], dim=-1)
+
+        cam_randomizer = self.camera_randomizer
+
+        camera_prims = [omni.usd.get_prim_at_path(f"/World/envs/env_{i}/Camera") for i in range(self.num_envs)]
+        cam_properties = [cam_randomizer.get_camera_properties(cam_prim) for cam_prim in camera_prims]
+
+        # Image size (we still use configured tile size unless you randomize resolution per-camera)
+        W = int(self.cfg.tiled_camera.width)
+        H = int(self.cfg.tiled_camera.height)
+
+        # Pre-allocate per-env tensors
+        device = self.device
+        B = self.num_envs
+        K = self.gt_keypoints.shape[1]  # e.g., 8
+        # containers
+        cam_off_pos = torch.zeros((B, 3), dtype=torch.float32, device=device)
+        # cam_eulers = torch.zeros((B, 3), dtype=torch.float32, device=device)  # degrees
+        cam_quat = torch.zeros((B,4), dtype=torch.float32, device=device)
+        focal_lengths = torch.full((B,), float(self.cfg.tiled_camera.spawn.focal_length), dtype=torch.float32, device=device)
+        apertures = torch.full((B,), float(self.cfg.tiled_camera.spawn.horizontal_aperture), dtype=torch.float32, device=device)
+
+        # populate from properties dict (fall back to cfg values if key missing)
+        for i, props in enumerate(cam_properties):
+            if not props:
+                continue
+            pos = props["position"]
+            cam_off_pos[i, :] = torch.tensor([pos[0], pos[1], pos[2]], dtype=torch.float32, device=device)
+            rot = props["rotation"]
+            # cam_eulers[i, :] = torch.tensor([rot[0], rot[1], rot[2]], dtype=torch.float32, device=device)
+            cam_quat[i, :] = torch.tensor([rot[0], rot[1], rot[2], rot[3]], dtype=torch.float32, device=device)
+            focal_lengths[i] = float(props["focal_length"])
+            apertures[i] = float(props["horizontal_aperture"])
+
+        # 4) Build per-env intrinsics (fx, fy, cx, cy). Units: focal_length and aperture must be in same unit (USD usually mm).
+        # fx = focal / sensor_width_mm * W
+        # sensor_height = sensor_width / (W/H)
+        sensor_width = apertures  # (B,)
+        sensor_height = sensor_width * (H / float(W))
+        # avoid zero
+        sensor_width = sensor_width.clamp(min=1e-6)
+        sensor_height = sensor_height.clamp(min=1e-6)
+
+        fx = (focal_lengths / sensor_width) * float(W)
+        fy = (focal_lengths / sensor_height) * float(H)
+        cx = torch.full((B,), float(W) / 2.0, device=device)
+        cy = torch.full((B,), float(H) / 2.0, device=device)
+
+        # 6) Transform GT keypoints from world to camera coords
+        # Ensure gt_keypoints is (B, K, 3) in same device/dtype
+        points_world = self.gt_keypoints.to(device=device)
+        points_cam = world_to_cam_batch(points_world, cam_off_pos, cam_quat)  # (B,K,3)
+
+        # 7) Project and test visibility
+        # NOTE: convention is "ros", since camera rnaomizer calls external isaaclab API
+        valid_mask, (u, v, visible) = _project_and_visible(points_cam, fx, fy, cx, cy, W, H, convention="opengl")  # (B,)
+
+        # convert valid_mask into same device/dtype as other tensors
+        valid_mask = valid_mask.to(device=device)
+
+        # NOTE: calling `sim.render()` here to ensure camera images are updated. it is necessary.
+        for i in range(20):
+            self.sim.render()
+
+        VIS_IMG_ONLINE = False
+        if VIS_IMG_ONLINE:
+
+            # get raw rgb (expect shape (B,H,W,3) or (H,W,3) and dtype uint8 or float in [0,1])
+            image_raw = self._tiled_camera.data.output["rgb"]
+
+            # get projected coords and visibility (u, v are torch tensors from _project_and_visible)
+            u_np = u.detach().cpu().numpy()
+            v_np = v.detach().cpu().numpy()
+            vis_np = visible.detach().cpu().numpy().astype(bool)
+
+            # convert image to numpy uint8 RGB if needed
+            if torch.is_tensor(image_raw):
+                img_np = image_raw.detach().cpu().numpy()
+            else:
+                img_np = np.array(image_raw)
+
+            # handle single image -> batch
+            if img_np.ndim == 3:
+                img_np = img_np[None, ...]
+
+            # ensure dtype uint8
+            if img_np.dtype != np.uint8:
+                # some pipelines provide 0-1 floats; convert to 0-255
+                img_np = (img_np * 255).astype(np.uint8)
+
+            n_imgs, h_img, w_img, c_img = img_np.shape
+            drawn = np.empty_like(img_np)
+
+            for i in range(n_imgs):
+                # convert to BGR for OpenCV drawing
+                img_bgr = cv2.cvtColor(img_np[i], cv2.COLOR_RGB2BGR).copy()
+
+                # draw each visible keypoint: draw point and cross-hair lines for u and v
+                for j in range(u_np.shape[1]):
+                    if vis_np[i, j]:
+                        x = int(round(u_np[i, j]))
+                        y = int(round(v_np[i, j]))
+                        # clip to image bounds
+                        if x < 0 or x >= w_img or y < 0 or y >= h_img:
+                            continue
+                        # filled circle at (u,v)
+                        cv2.circle(img_bgr, (x, y), radius=3, color=(0, 255, 0), thickness=-1)  # green dot
+                        # index label
+                        cv2.putText(img_bgr, str(j), (x + 4, y - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1, cv2.LINE_AA)
+                        # horizontal (v) and vertical (u) lines for visualization
+                        cv2.line(img_bgr, (0, y), (w_img - 1, y), color=(255, 0, 0), thickness=1)   # blue horizontal
+                        cv2.line(img_bgr, (x, 0), (x, h_img - 1), color=(0, 0, 255), thickness=1)   # red vertical
+
+                # convert back to RGB
+                drawn[i] = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+
+            # normalize to [0,1] float and make grid
+            image = drawn.astype(np.float32) / 255.0
+            tensor = torch.from_numpy(image).permute(0, 3, 1, 2)  # (B,C,H,W)
+            cols = int(math.ceil(math.sqrt(n_imgs)))
+            grid = torchvision.utils.make_grid(tensor, nrow=cols, padding=2)
+            grid = grid.permute(1, 2, 0).cpu().numpy()
+            grid_bgr = cv2.cvtColor((grid * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
+            cv2.imshow("tiled_camera", grid_bgr)
+            if hasattr(self, "_sim_step_counter") and (self._sim_step_counter % 12 == 0):
+                cv2.imwrite(f"./dexhand_vision_env_o12_hand_{self._sim_step_counter // 12}.png", grid_bgr)
+            cv2.waitKey(1)
+
+
+        # # 4) Train CNN with visibility mask
+        object_pose = world_to_cam_batch(object_pose.reshape(-1, 9, 3), cam_off_pos, cam_quat)  # (B,9,3)
+        intrinsics = torch.zeros((self.num_envs, 4)).float().to(self.device)
+        intrinsics[:, 0] = fx.to(self.device)
+        intrinsics[:, 1] = fy.to(self.device)
+        intrinsics[:, 2] = cx.to(self.device)
+        intrinsics[:, 3] = cy.to(self.device)
+        model_kwargs = {"intrinsics": intrinsics}
+
+        object_pose = object_pose.reshape(-1, 27)  # (B,27)
+        
+        pose_loss, pred_obj_pose = self.feature_extractor.step(
+            rgb_img=self._tiled_camera.data.output["rgb"],
+            depth_img=None,
+            gt_pose=object_pose,
+            mask=valid_mask,
+            model_kwargs=model_kwargs,
+        )
+        pred_obj_pose = pred_obj_pose.reshape(-1, 9, 3)  # (B,9,3)
+        pred_obj_pose = _cam_to_world(pred_obj_pose, cam_off_pos, cam_quat)  # (B,9,3)
+        pred_obj_pose = pred_obj_pose.reshape(-1, 27)  # (B,27)
+        self.embeddings = pred_obj_pose.clone().detach()
+
+        # 5) Goal keypoints and relative quaternion target
+        compute_keypoints(
+            pose=torch.cat((torch.zeros_like(self.goal_pos), self.goal_rot), dim=1), size=size, out=self.goal_keypoints
+        )
+        # Ground-truth rel_quat
+        # rel_quat = keypoints_to_relquat(self.gt_keypoints, self.goal_keypoints, self.object_pos)  # [B,4]
+
+        rel_quat = keypoints_to_relquat(self.embeddings[:, 3:].reshape(-1, 8, 3), self.goal_keypoints, self.embeddings[:,:3])  # [B,4]
+
+        # 6) Logging
+        if "log" not in self.extras:
+            self.extras["log"] = dict()
+        nv = int(valid_mask.sum().item())
+        vr = float(nv / self.num_envs)
+        self.extras["log"]["pose_loss"] = pose_loss
+        self.extras["log"]["num_valid_envs"] = nv
+        self.extras["log"]["valid_ratio"] = vr
+
+        # 7) Return image-based observation for policy
+        return rel_quat

@@ -893,62 +893,60 @@ class CameraRandomizer(BaseRandomizerType):
         else:
             raise ValueError(f"Unknown distribution: {distribution}")
 
-    def get_camera_properties(self) -> dict[str, Any]:
+    def get_camera_properties(self, camera_prim) -> dict[str, Any]:
         """Get current camera properties for debugging/logging."""
-        try:
+        if camera_prim is None:
             camera_prim = self._get_camera_prim()
-            if camera_prim is None:
-                return {}
-
-            from pxr import UsdGeom
-
-            properties = {}
-
-            # Get transform
-            xformable = UsdGeom.Xformable(camera_prim)
-            if xformable:
-                ops = xformable.GetOrderedXformOps()
-                for op in ops:
-                    if "translate" in op.GetOpName():
-                        properties["position"] = list(op.Get())
-                    elif "rotate" in op.GetOpName():
-                        properties["rotation"] = list(op.Get())
-
-            # Get camera properties
-            camera = UsdGeom.Camera(camera_prim)
-            if camera:
-                focal_attr = camera.GetFocalLengthAttr()
-                if focal_attr:
-                    properties["focal_length"] = focal_attr.Get()
-
-                aperture_attr = camera.GetHorizontalApertureAttr()
-                if aperture_attr:
-                    properties["horizontal_aperture"] = aperture_attr.Get()
-
-                focus_distance_attr = camera.GetFocusDistanceAttr()
-                if focus_distance_attr:
-                    properties["focus_distance"] = focus_distance_attr.Get()
-
-                clipping_attr = camera.GetClippingRangeAttr()
-                if clipping_attr:
-                    clipping_range = clipping_attr.Get()
-                    properties["clipping_range"] = [clipping_range[0], clipping_range[1]]
-
-                # Calculate FOV from focal length and aperture
-                focal = properties.get("focal_length", 24.0)
-                aperture = properties.get("horizontal_aperture", 20.955)
-                if focal > 0:
-                    import math
-
-                    fov = 2 * math.atan(aperture / (2 * focal)) * 180 / math.pi
-                    properties["horizontal_fov"] = fov
-
-            return properties
-
-        except Exception as e:
-            logger.error(f"Failed to get camera properties: {e}")
+        if camera_prim is None:
             return {}
 
+        from pxr import UsdGeom
+
+        properties = {}
+
+        # Get transform
+        xformable = UsdGeom.Xformable(camera_prim)
+        if xformable:
+            ops = xformable.GetOrderedXformOps()
+            for op in ops:
+                if "translate" in op.GetOpName():
+                    properties["position"] = list(op.Get())
+                elif "rotate" in op.GetOpName():
+                    properties["rotation"] = list(op.Get())
+                elif "orient" in op.GetOpName():
+                    Quatd = op.Get()
+                    properties["rotation"] = [Quatd.real, *list(Quatd.imaginary)]
+
+        # Get camera properties
+        camera = UsdGeom.Camera(camera_prim)
+        if camera:
+            focal_attr = camera.GetFocalLengthAttr()
+            if focal_attr:
+                properties["focal_length"] = focal_attr.Get()
+
+            aperture_attr = camera.GetHorizontalApertureAttr()
+            if aperture_attr:
+                properties["horizontal_aperture"] = aperture_attr.Get()
+
+            focus_distance_attr = camera.GetFocusDistanceAttr()
+            if focus_distance_attr:
+                properties["focus_distance"] = focus_distance_attr.Get()
+
+            clipping_attr = camera.GetClippingRangeAttr()
+            if clipping_attr:
+                clipping_range = clipping_attr.Get()
+                properties["clipping_range"] = [clipping_range[0], clipping_range[1]]
+
+            # Calculate FOV from focal length and aperture
+            focal = properties.get("focal_length", 24.0)
+            aperture = properties.get("horizontal_aperture", 20.955)
+            if focal > 0:
+                import math
+
+                fov = 2 * math.atan(aperture / (2 * focal)) * 180 / math.pi
+                properties["horizontal_fov"] = fov
+
+        return properties
 
 """Presets for camera domain randomization."""
 

@@ -19,7 +19,7 @@ except ModuleNotFoundError:
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, RigidObject
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sensors import TiledCamera, TiledCameraCfg
+from isaaclab.sensors import TiledCamera, TiledCameraCfg, CameraCfg, Camera
 from isaaclab.utils import configclass
 from isaaclab.utils.math import quat_apply, quat_conjugate
 
@@ -33,6 +33,9 @@ from isaaclab_tasks.direct.o12_hand.o12_hand_env_cfg import O12HandSim2RealEnvCf
 from cprint import cprint
 import datetime
 import os
+import math, cv2, torchvision
+import numpy as np
+import torch
 
 def _world_to_cam(points_world: torch.Tensor, cam_pos: torch.Tensor, cam_quat: torch.Tensor) -> torch.Tensor:
     """
@@ -90,17 +93,41 @@ def _compute_intrinsics(f_mm: float, apr_w_mm: float, width_px: int, height_px: 
 def _project_and_visible(points_cam: torch.Tensor, fx: float, fy: float, cx: float, cy: float, W: int, H: int, convention: str = "world"):
     """
     points_cam: (B, M, 3) in camera coords
+    fx, fy, cx, cy: either scalars or 1D tensors of shape (B,)
     convention: "opengl", "ros", or "world"
-    returns visible_mask_per_env: (B,) where True if >= 2 points visible
+    returns visible_mask_per_env: (B,) where True if >= min_visible points visible
     """
     B, M, _ = points_cam.shape
-    
+    device = points_cam.device
+    dtype = points_cam.dtype
+
+    # helper to convert intrinsics to (B,) tensor on correct device/dtype
+    def _to_batch_param(p):
+        if torch.is_tensor(p):
+            p_t = p.to(device=device, dtype=dtype)
+        else:
+            p_t = torch.tensor(p, device=device, dtype=dtype)
+        if p_t.dim() == 0:
+            p_t = p_t.expand(B)
+        elif p_t.dim() == 1:
+            if p_t.shape[0] == 1:
+                p_t = p_t.expand(B)
+            elif p_t.shape[0] != B:
+                raise ValueError(f"Intrinsic parameter has incompatible batch size {p_t.shape[0]} != {B}")
+        else:
+            raise ValueError("Intrinsic parameter must be scalar or 1D tensor of shape (B,)")
+        return p_t
+
+    fx_t = _to_batch_param(fx)
+    fy_t = _to_batch_param(fy)
+    cx_t = _to_batch_param(cx)
+    cy_t = _to_batch_param(cy)
+
     # Extract coordinates based on convention
     if convention == "opengl":
         # OpenGL: forward axis: -Z, up axis: +Y
-        # For projection, we need positive depth, so negate Z
         x = points_cam[..., 0]   # right
-        y = points_cam[..., 1]   # up
+        y = -points_cam[..., 1]   # up
         z = -points_cam[..., 2]  # depth (negate because forward is -Z)
     elif convention == "ros":
         # ROS: forward axis: +Z, up axis: -Y
@@ -115,20 +142,96 @@ def _project_and_visible(points_cam: torch.Tensor, fx: float, fy: float, cx: flo
         z = points_cam[..., 0]   # depth (camera z from world x)
     else:
         raise ValueError(f"Unknown convention: {convention}. Must be 'opengl', 'ros', or 'world'")
-    
-    # Check if points are in front of camera
-    in_front = z > 1e-6
 
-    # Perspective projection
-    u = fx * (x / z) + cx
-    v = fy * (y / z) + cy
+    # Check if points are in front of camera
+    in_front = z > 1e-6  # (B, M)
+
+    # Perspective projection with per-batch intrinsics
+    # shape: (B, 1) * (B, M) -> broadcast to (B, M)
+    u = fx_t.unsqueeze(1) * (x / z) + cx_t.unsqueeze(1)
+    v = fy_t.unsqueeze(1) * (y / z) + cy_t.unsqueeze(1)
 
     # Check if projected points are within image bounds
-    in_u = (u >= 0.0) & (u < W)
-    in_v = (v >= 0.0) & (v < H)
+    in_u = (u >= 0.0) & (u < float(W))
+    in_v = (v >= 0.0) & (v < float(H))
     visible = in_front & in_u & in_v           # (B,M)
     counts = visible.sum(dim=1)                # (B,)
-    return counts >= 8, (u, v, visible)
+
+    # Determine minimum number of visible keypoints to consider env valid (use 2 or M if smaller)
+    min_visible = 8
+    return counts >= min_visible, (u, v, visible)
+
+def euler_deg_to_quat_wxyz(euler_deg, order="xyz"):
+    """
+    euler_deg: (B,3) Tensor in degrees. Order is Euler angles in degrees.
+    Returns (B,4) quaternion in w,x,y,z (same convention used elsewhere).
+    Assumes euler order is (pitch, yaw, roll) if order="xyz" -> rotate around x, then y, then z.
+    """
+    # convert to radians
+    r = euler_deg * (math.pi / 180.0)
+    cx = torch.cos(r[:, 0] * 0.5)
+    sx = torch.sin(r[:, 0] * 0.5)
+    cy = torch.cos(r[:, 1] * 0.5)
+    sy = torch.sin(r[:, 1] * 0.5)
+    cz = torch.cos(r[:, 2] * 0.5)
+    sz = torch.sin(r[:, 2] * 0.5)
+
+    # quaternion composition for XYZ (x then y then z)
+    # q = qz * qy * qx  (depends on conventions). The CameraRandomizer earlier used pitch,yaw,roll
+    # below matches common aerospace (x=pitch, y=yaw, z=roll) composition
+    qw = cx * cy * cz + sx * sy * sz
+    qx = sx * cy * cz - cx * sy * sz
+    qy = cx * sy * cz + sx * cy * sz
+    qz = cx * cy * sz - sx * sy * cz
+
+    quat = torch.stack([qw, qx, qy, qz], dim=1)
+    # Normalize to reduce drift
+    quat = quat / torch.norm(quat, dim=1, keepdim=True).clamp(min=1e-8)
+    return quat  # (B,4) w,x,y,z
+
+def quat_conjugate(q):
+    # q: (...,4) w,x,y,z
+    qc = q.clone()
+    qc[..., 1:] = -qc[..., 1:]
+    return qc
+
+def quat_mul(q, r):
+    # quaternion multiply q * r, both (...,4) w,x,y,z
+    # out = (w, x, y, z)
+    w1, x1, y1, z1 = q.unbind(-1)
+    w2, x2, y2, z2 = r.unbind(-1)
+    w = w1*w2 - x1*x2 - y1*y2 - z1*z2
+    x = w1*x2 + x1*w2 + y1*z2 - z1*y2
+    y = w1*y2 - x1*z2 + y1*w2 + z1*x2
+    z = w1*z2 + x1*y2 - y1*x2 + z1*w2
+    return torch.stack((w, x, y, z), dim=-1)
+
+def rotate_points_by_quat(points, q):
+    # points: (B,N,3)
+    # q: (B,4) w,x,y,z
+    # rotate p by q: p' = q * (0,p) * q_conj
+    B, N, _ = points.shape
+    q = q.unsqueeze(1).expand(-1, N, -1)         # (B,N,4)
+    p_as_quat = torch.cat([torch.zeros((B, N, 1), device=points.device, dtype=points.dtype), points], dim=-1)
+    q_conj = quat_conjugate(q)
+    tmp = quat_mul(q, p_as_quat)   # (B,N,4)
+    rotated = quat_mul(tmp, q_conj)  # (B,N,4)
+    return rotated[..., 1:]  # (B,N,3)
+
+def world_to_cam_batch(points_world, cam_positions, cam_quats_wxyz):
+    """
+    Vectorized transform from world coords to camera coords.
+    - points_world: (B, K, 3)
+    - cam_positions: (B, 3) world position of camera
+    - cam_quats_wxyz: (B, 4) quaternion (w, x, y, z) representing camera orientation in world (camera->world)
+    Return: points_cam (B, K, 3) in camera coordinates (USD camera: +X right, +Y up, -Z forward)
+    """
+    # translate
+    rel = points_world - cam_positions.unsqueeze(1)  # (B,K,3)
+    # rotate into camera frame using inverse rotation (conjugate)
+    cam_quat_inv = quat_conjugate(cam_quats_wxyz)  # (B,4)
+    points_cam = rotate_points_by_quat(rel, cam_quat_inv)
+    return points_cam
 
 
 CURRENT_TIME = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
@@ -139,13 +242,15 @@ class DexHandVisionEnvCfg(DexHandEnvCfg):
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1225, env_spacing=2, replicate_physics=True)
 
     # camera
-    tiled_camera: TiledCameraCfg = TiledCameraCfg(
+    # tiled_camera: TiledCameraCfg = TiledCameraCfg(
+    tiled_camera: CameraCfg = CameraCfg(
         prim_path="/World/envs/env_.*/Camera",
         # NOTE: 'convention' specifies camera frame convention, so 'pos' is unaffected by convention, 'rot' is affected.
         # NOTE: camera is positioned to look down upon hand-object system.
         # offset=TiledCameraCfg.OffsetCfg(pos=(0, -0.35, 1.0), rot=(0.7071, 0.0, 0.7071, 0.0), convention="world"), # for shadow hand.
         # FIXME
-        offset=TiledCameraCfg.OffsetCfg(pos=(0, -0.1, 0.85), rot=(0.7071, 0.0, 0.7071, 0.0), convention="world"), # for o12 hand.
+        # offset=TiledCameraCfg.OffsetCfg(pos=(0, -0.1, 0.85), rot=(0.7071, 0.0, 0.7071, 0.0), convention="world"), # for o12 hand.
+        offset=CameraCfg.OffsetCfg(pos=(0, -0.1, 0.85), rot=(0.7071, 0.0, 0.7071, 0.0), convention="world"), # for o12 hand.
         data_types=["rgb"],
         spawn=sim_utils.PinholeCameraCfg(
             focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(0.1, 20.0)
@@ -199,7 +304,8 @@ class DexHandVisionEnv(InHandManipulationRealEnv):
         # add hand, in-hand object, and goal object
         self.hand = Articulation(self.cfg.robot_cfg)
         self.object = RigidObject(self.cfg.object_cfg)
-        self._tiled_camera = TiledCamera(self.cfg.tiled_camera)
+        self._tiled_camera = Camera(self.cfg.tiled_camera)
+        # self._tiled_camera = TiledCamera(self.cfg.tiled_camera)
         # get stage
         stage = omni.usd.get_context().get_stage()
         # add semantics for in-hand cube
@@ -220,6 +326,9 @@ class DexHandVisionEnv(InHandManipulationRealEnv):
         light_cfg.func("/World/Light", light_cfg)
 
     def _compute_image_observations(self):
+        
+        self._compute_intermediate_values()
+
         # 1) GT keypoints in world
         size = (2 * 0.03 * self.cfg.object_scale[0], 2 * 0.03 * self.cfg.object_scale[1], 2 * 0.03 * self.cfg.object_scale[2])
         compute_keypoints(pose=torch.cat((self.object_pos, self.object_rot), dim=1), size=size, out=self.gt_keypoints)
@@ -238,8 +347,8 @@ class DexHandVisionEnv(InHandManipulationRealEnv):
         # 3.2) Camera pose (world) from env origins 
         env_origins = self.scene.env_origins  # (B,3)
         cam_off_pos = torch.tensor(self.cfg.tiled_camera.offset.pos, dtype=torch.float32, device=self.device)  # (3,)
-        cam_off_quat = torch.tensor(self.cfg.tiled_camera.offset.rot, dtype=torch.float32, device=self.device)  # (4,) (wxyz)
-        cam_quat = cam_off_quat.expand(self.num_envs, -1)     # (B,4)
+        cam_quat = torch.tensor(self.cfg.tiled_camera.offset.rot, dtype=torch.float32, device=self.device)  # (4,) (wxyz)
+        cam_quat = cam_quat.expand(self.num_envs, -1)     # (B,4)
 
         # 3.3) Transform GT keypoints from world to camera coords
         points_cam = _world_to_cam(self.gt_keypoints, cam_off_pos, cam_quat)  # (B,8,3)
@@ -248,32 +357,83 @@ class DexHandVisionEnv(InHandManipulationRealEnv):
         convention = self.cfg.tiled_camera.offset.convention
         valid_mask, (u, v, visible) = _project_and_visible(points_cam, fx, fy, cx, cy, W, H, convention=convention)  # (B,)
 
-        # NOTE: calling `sim.render()` here to ensure camera images are updated. not sure if this is necessary.
-        for i in range(10):
+        # NOTE: calling `sim.render()` here to ensure camera images are updated. it is necessary.
+        for i in range(20):
             self.sim.render()
 
         VIS_IMG_ONLINE = False
         if VIS_IMG_ONLINE:
-            import math, cv2, torchvision
-            import numpy as np
-            image = self._tiled_camera.data.output["rgb"] / 255.0  # (H,W,3) uint8
-            tensor = image.permute(0,3,1,2)
-            n = image.shape[0]
-            cols = int(math.ceil(math.sqrt(n)))
-            grid = torchvision.utils.make_grid(tensor, nrow=cols, padding=2)
-            grid = grid.permute(1,2,0).cpu().numpy()
-            grid_bgr = cv2.cvtColor((grid*255).astype(np.uint8), cv2.COLOR_RGB2BGR)
-            cv2.imshow("tiled_camera", grid_bgr)
-            if self._sim_step_counter % 12 == 0:
-                cv2.imwrite(f"./dexhand_vision_env_o12_hand_{self._sim_step_counter // 12}.png", grid_bgr)
-            cv2.waitKey(2)
 
-        # 4) Train CNN with visibility mask
+            # get raw rgb (expect shape (B,H,W,3) or (H,W,3) and dtype uint8 or float in [0,1])
+            image_raw = self._tiled_camera.data.output["rgb"]
+
+            # get projected coords and visibility (u, v are torch tensors from _project_and_visible)
+            u_np = u.detach().cpu().numpy()
+            v_np = v.detach().cpu().numpy()
+            vis_np = visible.detach().cpu().numpy().astype(bool)
+
+            # convert image to numpy uint8 RGB if needed
+            if torch.is_tensor(image_raw):
+                img_np = image_raw.detach().cpu().numpy()
+            else:
+                img_np = np.array(image_raw)
+
+            # handle single image -> batch
+            if img_np.ndim == 3:
+                img_np = img_np[None, ...]
+
+            # ensure dtype uint8
+            if img_np.dtype != np.uint8:
+                # some pipelines provide 0-1 floats; convert to 0-255
+                img_np = (img_np * 255).astype(np.uint8)
+
+            n_imgs, h_img, w_img, c_img = img_np.shape
+            drawn = np.empty_like(img_np)
+
+            for i in range(n_imgs):
+                # convert to BGR for OpenCV drawing
+                img_bgr = cv2.cvtColor(img_np[i], cv2.COLOR_RGB2BGR).copy()
+
+                # draw each visible keypoint: draw point and cross-hair lines for u and v
+                for j in range(u_np.shape[1]):
+                    if vis_np[i, j]:
+                        x = int(round(u_np[i, j]))
+                        y = int(round(v_np[i, j]))
+                        # clip to image bounds
+                        if x < 0 or x >= w_img or y < 0 or y >= h_img:
+                            continue
+                        # filled circle at (u,v)
+                        cv2.circle(img_bgr, (x, y), radius=3, color=(0, 255, 0), thickness=-1)  # green dot
+                        # index label
+                        cv2.putText(img_bgr, str(j), (x + 4, y - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1, cv2.LINE_AA)
+                        # horizontal (v) and vertical (u) lines for visualization
+                        cv2.line(img_bgr, (0, y), (w_img - 1, y), color=(255, 0, 0), thickness=1)   # blue horizontal
+                        cv2.line(img_bgr, (x, 0), (x, h_img - 1), color=(0, 0, 255), thickness=1)   # red vertical
+
+                # convert back to RGB
+                drawn[i] = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+
+            # normalize to [0,1] float and make grid
+            image = drawn.astype(np.float32) / 255.0
+            tensor = torch.from_numpy(image).permute(0, 3, 1, 2)  # (B,C,H,W)
+            cols = int(math.ceil(math.sqrt(n_imgs)))
+            grid = torchvision.utils.make_grid(tensor, nrow=cols, padding=2)
+            grid = grid.permute(1, 2, 0).cpu().numpy()
+            grid_bgr = cv2.cvtColor((grid * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
+            cv2.imshow("tiled_camera", grid_bgr)
+            if hasattr(self, "_sim_step_counter") and (self._sim_step_counter % 12 == 0):
+                cv2.imwrite(f"./dexhand_vision_env_o12_hand_{self._sim_step_counter // 12}.png", grid_bgr)
+            cv2.waitKey(1)
+
+            # breakpoint()
+
+        # # 4) Train CNN with visibility mask
         object_pose = _world_to_cam(object_pose.reshape(-1, 9, 3), cam_off_pos, cam_quat)  # (B,9,3)
-        object_pose = object_pose.reshape(-1, 27)  # (B,27)
         model_kwargs = {
             "intrinsics": torch.tensor([fx, fy, cx, cy], dtype=torch.float32, device=self.device).unsqueeze(0).expand(self.num_envs, -1)  # (B,4)
         }
+
+        object_pose = object_pose.reshape(-1, 27)  # (B,27)
         
         pose_loss, pred_obj_pose = self.feature_extractor.step(
             rgb_img=self._tiled_camera.data.output["rgb"],
