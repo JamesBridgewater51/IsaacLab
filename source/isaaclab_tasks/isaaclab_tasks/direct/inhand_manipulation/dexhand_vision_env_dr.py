@@ -399,8 +399,8 @@ class DexHandVisionDREnv(DexHandVisionEnv):
             self.sim.render()
 
         # DEBUG: visualize ground-truth camera projections.
-        VIS_IMG_ONLINE = False
-        if VIS_IMG_ONLINE:
+        DBG_GT_CAMERA_PROJS = True
+        if DBG_GT_CAMERA_PROJS:
 
             # get raw rgb (expect shape (B,H,W,3) or (H,W,3) and dtype uint8 or float in [0,1])
             image_raw = self._tiled_camera.data.output["rgb"]
@@ -455,14 +455,19 @@ class DexHandVisionDREnv(DexHandVisionEnv):
             image = drawn.astype(np.float32) / 255.0
             tensor = torch.from_numpy(image).permute(0, 3, 1, 2)  # (B,C,H,W)
             cols = int(math.ceil(math.sqrt(n_imgs)))
-            grid = torchvision.utils.make_grid(tensor, nrow=cols, padding=2)
-            grid = grid.permute(1, 2, 0).cpu().numpy()
-            grid_bgr = cv2.cvtColor((grid * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
-            cv2.imshow("ground-truth-tiled-camera", grid_bgr)
-            if hasattr(self, "_sim_step_counter") and (self._sim_step_counter % 12 == 0):
-                cv2.imwrite(f"./dexhand_vision_env_o12_hand_{self._sim_step_counter // 12}.png", grid_bgr)
-            cv2.waitKey(1)
-
+            grid = torchvision.utils.make_grid(tensor, nrow=cols, padding=2) # (C,H,W)
+            VIS_IMG_ONLINE = False
+            if VIS_IMG_ONLINE:
+                _grid = grid.permute(1, 2, 0).cpu().numpy() # (H,W,C)
+                grid_bgr = cv2.cvtColor((_grid * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
+                cv2.imshow("ground-truth-tiled-camera", grid_bgr)
+                if hasattr(self, "_sim_step_counter") and (self._sim_step_counter % 12 == 0):
+                    cv2.imwrite(f"./dexhand_vision_env_o12_hand_{self._sim_step_counter // 12}.png", grid_bgr)
+                cv2.waitKey(1)
+            # Write to tensor board
+            WRITE_TB = True
+            if WRITE_TB and self.feature_extractor.step_count % 20 == 0:
+                self.feature_extractor.tb_writer.add_image("ground-truth-tiled-camera", grid, global_step=self.feature_extractor.step_count)
 
         # # 4) Train CNN with visibility mask
         if hasattr(self, "camera_randomizer") and self.camera_randomizer is not None:
@@ -492,8 +497,8 @@ class DexHandVisionDREnv(DexHandVisionEnv):
         )
 
         # DEBUG: visualize model predictions
-        VIS_IMG_ONLINE = False
-        if VIS_IMG_ONLINE:
+        DBG_PRED_CAMERA_PROJS = True
+        if DBG_PRED_CAMERA_PROJS:
 
             valid_mask, (u, v, visible) = _project_and_visible(pred_obj_pose.reshape(-1, 9, 3), fx, fy, cx, cy, W, H, convention=convention)  # (B,)
             
@@ -551,12 +556,21 @@ class DexHandVisionDREnv(DexHandVisionEnv):
             tensor = torch.from_numpy(image).permute(0, 3, 1, 2)  # (B,C,H,W)
             cols = int(math.ceil(math.sqrt(n_imgs)))
             grid = torchvision.utils.make_grid(tensor, nrow=cols, padding=2)
-            grid = grid.permute(1, 2, 0).cpu().numpy()
-            grid_bgr = cv2.cvtColor((grid * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
-            cv2.imshow("predicted-tiled-camera", grid_bgr)
-            if hasattr(self, "_sim_step_counter") and (self._sim_step_counter % 12 == 0):
-                cv2.imwrite(f"./dexhand_vision_env_o12_hand_{self._sim_step_counter // 12}.png", grid_bgr)
-            cv2.waitKey(1)
+            VIS_IMG_ONLINE = False
+            # NOTE: this is after `step` call, so we need to subtract 1 to get the previous step.
+            if VIS_IMG_ONLINE and (self.feature_extractor.step_count-1) % 20 == 0:
+                grid = grid.permute(1, 2, 0).cpu().numpy()
+                grid_bgr = cv2.cvtColor((grid * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
+                cv2.imshow("predicted-tiled-camera", grid_bgr)
+                if hasattr(self, "_sim_step_counter") and (self._sim_step_counter % 12 == 0):
+                    cv2.imwrite(f"./dexhand_vision_env_o12_hand_{self._sim_step_counter // 12}.png", grid_bgr)
+                cv2.waitKey(1)
+            WRITE_TB = True
+            # NOTE: this is after `step` call, so we need to subtract 1 to get the previous step.
+            if WRITE_TB and (self.feature_extractor.step_count-1) % 20 == 0:
+                self.feature_extractor.tb_writer.add_image("predicted-tiled-camera", grid, global_step=self.feature_extractor.step_count)
+                # NOTE: flush to ensure the image is written to disk, cause it is weird that the image is not written to disk sometimes. Investigate it later.
+                self.feature_extractor.tb_writer.flush()
 
         pred_obj_pose = pred_obj_pose.reshape(-1, 9, 3)  # (B,9,3)
         if hasattr(self, "camera_randomizer"):

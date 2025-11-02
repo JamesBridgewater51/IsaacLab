@@ -282,13 +282,13 @@ class FeatureExtractor:
         # Convert gt 3D camera points to pixel coords u,v
         gt_kp3 = gt_pose_cam.view(B, K, 3)  # (B,K,3) in camera frame
 
-        # avoid div by zero
+        # FIXME: The output of DepthHead in ImprovedResNet50PoseNet leads to small negative values, so ease of training, we currently define z as negative.
+        # since the supervision target is negative, we treat model_predictions model['pred_depths'] as negative.
         if camera_convention == "opengl":
-            z = gt_kp3[..., 2].clamp(min=1e-6)
+            z = -(-gt_kp3[..., 2].clamp(min=1e-6))
         elif camera_convention == "ros":
-            z = gt_kp3[..., 2].clamp(min=1e-6)
+            z = -(gt_kp3[..., 2].clamp(min=1e-6))
         elif camera_convention == "world":
-            # The output of DepthHead in ImprovedResNet50PoseNet leads to small negative values, so ease of training, we currently define z as negative.
             z = -(gt_kp3[..., 0].clamp(min=1e-6))
         else:
             raise ValueError(f"Unknown convention : {convention}. Must be 'opengl', 'ros' or 'world")
@@ -518,8 +518,40 @@ class FeatureExtractor:
             cy = intrinsics[:,3].view(B,1,1)
             px = pred_coords[...,0].unsqueeze(-1)
             py = pred_coords[...,1].unsqueeze(-1)
-            pz = pred_depths.unsqueeze(-1)
-            pred_xyz = torch.cat([ (px - cx)*pz / fx, (py - cy)*pz / fy, pz ], dim=-1)  # (B,K,3)
+            # NOTE: in the depth-supervision losses, we treat model_predictions model['pred_depths'] as negative, so we have negated it here.
+            pz = -pred_depths.unsqueeze(-1)
+            # Unprojection: compute pred_xyz in camera frame from predicted u,v,z for specified convention
+            # px, py: (B, K, 1) -- u,v
+            # pz: (B, K, 1) -- depth
+            # fx, fy, cx, cy: (B,1,1)
+            if camera_convention == "opengl":
+                # OpenGL: cam x=u, y=v, z=-z
+                x = (px - cx) * pz / fx                      # (B,K,1)
+                y = -(py - cy) * pz / fy                     # (B,K,1)
+                z = -pz                                      # (B,K,1)
+                pred_xyz = torch.cat([x, y, z], dim=-1)      # (B,K,3)
+            elif camera_convention == "ros":
+                # ROS: cam x=u, y=v, z=+z (forward)
+                x = (px - cx) * pz / fx
+                y = -(py - cy) * pz / fy
+                z = pz
+                pred_xyz = torch.cat([x, y, z], dim=-1)
+            elif camera_convention == "world":
+                # "world" convention: cam_right = -y, cam_up = z, cam_forward = x.
+                # Original projection: u = fx*(-y/z)+cx, v = fy*(z/x)+cy, depth = x
+                # To unproject: 
+                # Given u=fx*(-y/z)+cx, v=fy*(z/x)+cy, depth=x
+                # Therefore,
+                #   Let px = u, py = v, pz = x
+                #   -y = (px - cx) * z / fx  => y = - (px - cx) * z / fx
+                #   z = (py - cy) * pz / fy
+                #   x = pz
+                x = pz
+                z_ = (py - cy) * pz / fy
+                y = - (px - cx) * z_ / fx
+                pred_xyz = torch.cat([x, y, z_], dim=-1)
+            else:
+                raise ValueError(f"Unknown camera_convention '{camera_convention}', must be one of ('opengl','ros','world')")
             pred_obj_pose = pred_xyz.reshape(B, -1).detach()
             return total_loss.detach(), pred_obj_pose
 
@@ -539,8 +571,31 @@ class FeatureExtractor:
             cy = intrinsics[:,3].view(B,1,1).to(self.device)
             px = pred_coords[...,0].unsqueeze(-1)
             py = pred_coords[...,1].unsqueeze(-1)
-            pz = pred_depths.unsqueeze(-1)
-            pred_xyz = torch.cat([ (px - cx)*pz / fx, (py - cy)*pz / fy, pz ], dim=-1)
+            # NOTE: in the depth-supervision losses, we treat model_predictions model['pred_depths'] as negative, so we have negated it here.
+            pz = -pred_depths.unsqueeze(-1)
+            # Compute pred_xyz according to camera_convention as in the training if-branch above
+            if camera_convention == "opengl":
+                # OpenGL: cam x=u, y=v, z=-z
+                x = (px - cx) * pz / fx
+                y = -(py - cy) * pz / fy
+                z = -pz
+                pred_xyz = torch.cat([x, y, z], dim=-1)
+            elif camera_convention == "ros":
+                # ROS: cam x=u, y=v, z=+z (forward)
+                x = (px - cx) * pz / fx
+                y = -(py - cy) * pz / fy
+                z = pz
+                pred_xyz = torch.cat([x, y, z], dim=-1)
+            elif camera_convention == "world":
+                # "world" convention: cam_right = -y, cam_up = z, cam_forward = x.
+                # See the logic in the corresponding if-branch above
+                x = pz
+                z_ = (py - cy) * pz / fy
+                y = - (px - cx) * z_ / fx
+                pred_xyz = torch.cat([x, y, z_], dim=-1)
+            else:
+                raise ValueError(f"Unknown camera_convention '{camera_convention}', must be one of ('opengl','ros','world')")
+
             predicted_pose = pred_xyz.reshape(B, -1).detach()
             if gt_pose is not None:
                 # compute MSE for logging (convert both to same device)

@@ -3,9 +3,11 @@
 import argparse
 
 from isaaclab.app import AppLauncher
+import time
 
 # add argparse arguments
-parser = argparse.ArgumentParser(description="Tutorial on spawning and interacting with an articulation.")
+parser = argparse.ArgumentParser(description="Train a feature extractor for in-hand manipulation.")
+parser.add_argument("--run_name", type=str, default=f"train_feature_extractor_{time.strftime('%m-%d-%H-%M-%S')}", help="Name of the run for logging and checkpoints.")
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
@@ -16,7 +18,6 @@ app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
 import os
-import time
 import torch
 import omni.usd
 from isaaclab_tasks.direct.inhand_manipulation.dexhand_vision_env import DexHandVisionEnv, DexHandVisionEnvCfg
