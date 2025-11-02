@@ -233,6 +233,20 @@ def world_to_cam_batch(points_world, cam_positions, cam_quats_wxyz):
     points_cam = rotate_points_by_quat(rel, cam_quat_inv)
     return points_cam
 
+def cam_to_world_batch(points_cam, cam_positions, cam_quats_wxyz):
+    """
+    Vectorized transform from camera coords to world coords.
+    - points_cam: (B, K, 3)
+    - cam_positions: (B, 3) world position of camera
+    - cam_quats_wxyz: (B, 4) quaternion (w, x, y, z) representing camera orientation in world (camera->world)
+    Return: points_world (B, K, 3)
+    """
+    # rotate from camera frame to world frame (use forward rotation)
+    rotated = rotate_points_by_quat(points_cam, cam_quats_wxyz)  # (B,K,3)
+    # translate to world
+    points_world = rotated + cam_positions.unsqueeze(1)  # (B,K,3)
+    return points_world
+
 
 CURRENT_TIME = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
 
@@ -253,12 +267,12 @@ class DexHandVisionEnvCfg(DexHandEnvCfg):
         offset=CameraCfg.OffsetCfg(pos=(0, -0.1, 0.85), rot=(0.7071, 0.0, 0.7071, 0.0), convention="world"), # for o12 hand.
         data_types=["rgb"],
         spawn=sim_utils.PinholeCameraCfg(
-            focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(0.1, 20.0)
+            focal_length=24.0, focus_distance=400.0, horizontal_aperture=25.09803921568627451, clipping_range=(0.1, 20.0)
         ),
         width=120,
         height=120,
     )
-    feature_extractor = FeatureExtractorCfg(train=False, save_data_to_file=False, load_checkpoint=False, input_modality="rgb_only", base_dir=os.path.join(os.path.dirname(os.path.dirname(__file__)), "o12_hand", CURRENT_TIME))
+    feature_extractor = FeatureExtractorCfg(train=True, save_data_to_file=False, load_checkpoint=False, input_modality="rgb_only", base_dir=os.path.join(os.path.dirname(os.path.dirname(__file__)), "o12_hand", CURRENT_TIME))
     # feature_extractor = FeatureExtractorCfg(train=True, load_checkpoint=True, input_modality="rgb_only", base_dir=os.path.join(os.path.dirname(os.path.dirname(__file__)), "o12_hand", CURRENT_TIME))
 
 
@@ -351,7 +365,8 @@ class DexHandVisionEnv(InHandManipulationRealEnv):
         cam_quat = cam_quat.expand(self.num_envs, -1)     # (B,4)
 
         # 3.3) Transform GT keypoints from world to camera coords
-        points_cam = _world_to_cam(self.gt_keypoints, cam_off_pos, cam_quat)  # (B,8,3)
+        _obj_pose = object_pose.reshape(-1, 9, 3)
+        points_cam = _world_to_cam(_obj_pose, cam_off_pos, cam_quat)  # (B,9,3)
 
         # 3.4) Project and test visibility
         convention = self.cfg.tiled_camera.offset.convention
@@ -439,6 +454,7 @@ class DexHandVisionEnv(InHandManipulationRealEnv):
             rgb_img=self._tiled_camera.data.output["rgb"],
             depth_img=None,
             gt_pose=object_pose,
+            gt_uv=torch.stack([u,v], dim=-1),
             mask=valid_mask,
             model_kwargs=model_kwargs,
         )

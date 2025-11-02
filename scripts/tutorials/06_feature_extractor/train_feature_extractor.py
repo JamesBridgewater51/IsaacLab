@@ -28,18 +28,21 @@ def main():
 
     # ---- configure
     cfg = DexHandVisionDREnvCfg()
-    cfg.scene.num_envs = 1536  # 
-    cfg.tiled_camera.width = 120
-    cfg.tiled_camera.height = 120
+    # cfg = DexHandVisionEnvCfg()
+    # cfg.scene.num_envs = 1536  # 
+    cfg.scene.num_envs = 16  # 
+    cfg.tiled_camera.width = 320
+    cfg.tiled_camera.height = 240
     cfg.feature_extractor.train = True
     cfg.feature_extractor.load_checkpoint = False
     cfg.feature_extractor.input_modality = "rgb_only"
-    cfg.feature_extractor.base_dir = os.path.join("runs", f"train_feature_extractor_{int(time.time())}")
+    cfg.feature_extractor.base_dir = os.path.join("runs", f"train_feature_extractor_{time.strftime('%m-%d-%H-%M-%S')}")
     cfg.feature_extractor.write_image_to_file = False  # set True if you want RGB dumps
-    cfg.feature_extractor.save_data_to_file = True  # set True if you want to save data
+    cfg.feature_extractor.save_data_to_file = False  # set True if you want to save data
 
     # instantiate
     env = DexHandVisionDREnv(cfg, render_mode=None)
+    # env = DexHandVisionEnv(cfg, render_mode=None)
     num_envs = env.num_envs
     act_dim = cfg.action_space  # 12 for O12HandSim2RealEnvCfg
 
@@ -52,7 +55,7 @@ def main():
         actions = (2.0 * torch.rand((num_envs, act_dim), device=env.device) - 1.0).clamp(-1.0, 1.0)
         obs, rew, terminated, truncated, info = env.step(actions)
 
-        if t % 100 == 0:
+        if t % 1 == 0:
             log = env.extras["log"]
             loss_val = float(log["pose_loss"])
             nv = log["num_valid_envs"]
