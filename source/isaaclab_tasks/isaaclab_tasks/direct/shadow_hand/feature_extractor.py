@@ -40,34 +40,34 @@ def make_2d_gaussian_heatmap(H, W, centers_uv, sigma):
 
 def pairwise_edge_targets_for_cube(size_xyz):
     """
-    Given size = (sx, sy, sz) (half- or full-? we use your compute_keypoints sizes),
+    Given size = (sx, sy, sz) (cube FULL side lengths),
     produce target pairwise distances for the standard cube corners ordering
-    (assumes your compute_keypoints uses the same corner order).
+    (MUST match the compute_keypoints ordering below).
     Returns: (M,) distances for selected edges/pairs used for rigidity loss.
     We'll use all 12 cube edges (pairs) for the cube (8 corners, 12 edges).
+
+    This is compatible with the following compute_keypoints implementation, where for each i in 0..7:
+        n = [((i >> k)&1)==0 for k in range(3)]
+        corner = [ (1 if n[k] else -1) * s/2 for k,s in enumerate(size) ]
     """
-    # Construct canonical cube corners centered at 0 with half-sizes
     sx, sy, sz = size_xyz
-    hx, hy, hz = sx/2.0, sy/2.0, sz/2.0
-    corners = torch.tensor([
-        [-hx, -hy, -hz],
-        [+hx, -hy, -hz],
-        [+hx, +hy, -hz],
-        [-hx, +hy, -hz],
-        [-hx, -hy, +hz],
-        [+hx, -hy, +hz],
-        [+hx, +hy, +hz],
-        [-hx, +hy, +hz],
-    ], dtype=torch.float32)  # (8,3)
-    # List the 12 cube edges (pairs of indices)
+    # Use the identical ordering as in compute_keypoints
+    corners = []
+    for i in range(8):
+        n = [((i >> k) & 1) == 0 for k in range(3)]
+        corner = [ (1 if n[k] else -1) * s/2 for k, s in enumerate((sx, sy, sz)) ]
+        corners.append(corner)
+    corners = torch.tensor(corners, dtype=torch.float32)  # (8,3)
+
+    # NOTE: this is double-checked to be correct with current compute_keypoints implementation.
     edges = [
-        (0,1),(1,2),(2,3),(3,0),  # bottom square
-        (4,5),(5,6),(6,7),(7,4),  # top square
-        (0,4),(1,5),(2,6),(3,7)   # vertical edges
+        (0, 1), (1, 5), (5, 4), (4, 0),  # bottom face (y = +cube)
+        (3, 2), (2, 6), (6, 7), (7, 3),  # top face (y = -cube)
+        (0, 2), (1, 3), (6, 4), (5, 7)   # vertical edges (columns)
     ]
     dists = []
     for (i,j) in edges:
-        dists.append(torch.norm(corners[i]-corners[j]).item())
+        dists.append(torch.norm(corners[i] - corners[j]).item())
     return torch.tensor(dists, dtype=torch.float32, device=None), edges
 
 @configclass
@@ -80,7 +80,7 @@ class FeatureExtractorCfg:
     load_checkpoint: bool = False
     """If True, the feature extractor model is loaded from a checkpoint. Default is False."""
 
-    checkpoint_path: str = "/home/minghao/src/robotflow/IsaacLab/runs/train_feature_extractor_10-31-19-59-00/logs/cnn_rgb_only_6000_0.0776.pth"
+    checkpoint_path: str = ""
     """ """
 
     write_image_to_file: bool = False
@@ -120,63 +120,6 @@ def soft_argmax_2d(heatmaps, eps=1e-6):
     y = (prob * grid_y).sum(dim=[2,3])
     return torch.stack([x, y], dim=-1)  # (B, K, 2)
 
-# class FeatureExtractorNetwork(nn.Module):
-#     """CNN architecture used to regress keypoint positions of the in-hand cube from image data."""
-
-#     def __init__(self, input_modality: str = "rgb_depth"):
-#         super().__init__()
-#         self.input_modality = input_modality
-        
-#         # Determine number of input channels based on modality
-#         if input_modality == "rgb_only":
-#             num_channel = 3
-#         elif input_modality == "depth_only":
-#             num_channel = 1
-#         elif input_modality == "rgb_depth":
-#             num_channel = 4
-#         else:
-#             raise ValueError(f"Unsupported input modality: {input_modality}")
-        
-        
-#         # CNN adapted for input H=320, W=240 -> spatial sizes computed per conv,
-#         self.cnn = nn.Sequential(
-#             nn.Conv2d(num_channel, 16, kernel_size=6, stride=2, padding=0),  # -> (16, 118, 158)
-#             nn.ReLU(),
-#             nn.LayerNorm([16, 118, 158]),
-#             nn.Conv2d(16, 32, kernel_size=4, stride=2, padding=0),           # -> (32, 58, 78)
-#             nn.ReLU(),
-#             nn.LayerNorm([32, 58, 78]),
-#             nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=0),           # -> (64, 28, 38)
-#             nn.ReLU(),
-#             nn.LayerNorm([64, 28, 38]),
-#             nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=0),          # -> (128, 13, 18)
-#             nn.ReLU(),
-#             nn.LayerNorm([128, 13, 18]),
-#             nn.AvgPool2d((13, 18)),  # pool to (128,1,1)
-#         )
-
-#         self.linear = nn.Sequential(
-#             nn.Linear(128, 27),
-#         )
-
-#         # Data transforms for RGB channels only
-#         self.data_transforms = torchvision.transforms.Compose([
-#             torchvision.transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-#         ])
-
-#     def forward(self, x):
-#         x = x.permute(0, 3, 1, 2)
-        
-#         # Apply normalization only to RGB channels
-#         if self.input_modality in ["rgb_only", "rgb_depth"]:
-#             if self.input_modality == "rgb_only":
-#                 x = self.data_transforms(x)
-#             elif self.input_modality == "rgb_depth":
-#                 x[:, 0:3, :, :] = self.data_transforms(x[:, 0:3, :, :])
-        
-#         cnn_x = self.cnn(x)
-#         out = self.linear(cnn_x.view(-1, 128))
-#         return out
 
 class FeatureExtractor:
     def __init__(self, cfg: FeatureExtractorCfg, device: str):
@@ -216,8 +159,16 @@ class FeatureExtractor:
             self.coord_loss_fn   = nn.L1Loss(reduction='none')  # compute per-keypoint then mask
             self.depth_loss_fn   = nn.L1Loss(reduction='none')
             self.feature_extractor.train()
+            # Support for DDP: check if model is wrapped
+            self._is_ddp = isinstance(self.feature_extractor, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel))
+            if self._is_ddp:
+                self._model_unwrapped = self.feature_extractor.module if hasattr(self.feature_extractor, 'module') else self.feature_extractor
+            else:
+                self._model_unwrapped = self.feature_extractor
         else:
             self.feature_extractor.eval()
+            self._is_ddp = False
+            self._model_unwrapped = self.feature_extractor
 
         # optional dataset saving
         if self.cfg.save_data_to_file:
@@ -235,36 +186,15 @@ class FeatureExtractor:
         size_vec = (side, side, side)
         self._cube_edge_targets, self._cube_edges = pairwise_edge_targets_for_cube(size_vec)
         # store heatmap sigma (in pixels) and heatmap stride
-        self.heatmap_sigma = getattr(self.cfg, "heatmap_sigma", 2.0)  # tune 1.5-4.0
+        self.heatmap_sigma = getattr(self.cfg, "heatmap_sigma", 1.5)  # tune 1.5-4.0
         self.heatmap_stride = getattr(self.cfg, "heatmap_stride", 4)  # model produces low-res heatmaps at /4
         # loss weights
         self.w_heatmap = getattr(self.cfg, "w_heatmap", 1.0)
-        self.w_coord   = getattr(self.cfg, "w_coord", 0.5)
-        self.w_depth   = getattr(self.cfg, "w_depth", 1.0)
-        self.w_rigid   = getattr(self.cfg, "w_rigid", 0.5)
+        self.w_coord   = getattr(self.cfg, "w_coord", 1.0)
+        self.w_depth   = getattr(self.cfg, "w_depth", 0.5)
+        self.w_rigid   = getattr(self.cfg, "w_rigid", 1.0)
 
-    # helper: make heatmap targets (low-res) from gt object_pose (B,27)
-    def _make_heatmaps_from_gt(self, gt_pose_cam, H, W):
-        """
-        gt_pose_cam: (B,27) OR (B,9,3) in camera pixel coords (we assume values in pixel coordinate u,v and depth)
-        returns: low-res heatmaps (B, K, H//stride, W//stride) and gt pixel coords (B,K,2)
-        """
-        B = gt_pose_cam.shape[0]
-        if gt_pose_cam.ndim == 2 and gt_pose_cam.shape[1] == 27:
-            gt_kp = gt_pose_cam.view(B, 9, 3)
-        elif gt_pose_cam.ndim == 3:
-            gt_kp = gt_pose_cam
-        else:
-            raise ValueError("gt_pose_cam expected (B,27) or (B,9,3)")
-
-        # pixel coords (u,v) are first two of each kp? In your pipeline you provided object_pose in camera coords already projected earlier.
-        # We assume gt_kp contains (x_cam, y_cam, z_cam) in camera coordinates (not pixel coords). We need pixel coords: u = fx*x/z + cx, etc.
-        # But in your env earlier you already projected to camera (object_pose = _world_to_cam(...)) then reshape to 27 - that returns 3D points in camera frame.
-        # Here: we will require the caller to provide intrinsics via model_kwargs for correct projection; however the step() caller already passes intrinsics.
-        # So this function will just produce heatmaps from pixel coords if they are already pixel coords. To be robust, we'll accept both:
-        return gt_kp  # placeholder: actual projection done in _compute_losses below where intrinsics are available
-
-    def _compute_losses(self, model_out, gt_pose_cam, gt_uv, intrinsics, valid_mask, camera_convention: Literal["opengl", "world", "ros"]):
+    def _compute_losses(self, model_out, gt_pose_cam, gt_uv, intrinsics, valid_mask, camera_convention: Literal["opengl", "world", "ros"], H, W):
         """
         model_out: dict with keys 'heatmaps' (B,K,h,w), 'coords' (B,K,2 pixel), 'depths' (B,K), 'pooled_context'
         gt_pose_cam: (B,27) in camera coords (x,y,z in camera frame)
@@ -276,8 +206,6 @@ class FeatureExtractor:
         B = gt_pose_cam.shape[0]
         device = gt_pose_cam.device
         K = model_out['coords'].shape[1]
-        Hgt = int(self.cfg.tiled_camera.height) if hasattr(self.cfg, "tiled_camera") else None
-        Wgt = int(self.cfg.tiled_camera.width) if hasattr(self.cfg, "tiled_camera") else None
 
         # Convert gt 3D camera points to pixel coords u,v
         gt_kp3 = gt_pose_cam.view(B, K, 3)  # (B,K,3) in camera frame
@@ -285,7 +213,7 @@ class FeatureExtractor:
         # FIXME: The output of DepthHead in ImprovedResNet50PoseNet leads to small negative values, so ease of training, we currently define z as negative.
         # since the supervision target is negative, we treat model_predictions model['pred_depths'] as negative.
         if camera_convention == "opengl":
-            z = -(-gt_kp3[..., 2].clamp(min=1e-6))
+            z = -((-gt_kp3[..., 2]).clamp(min=1e-6))
         elif camera_convention == "ros":
             z = -(gt_kp3[..., 2].clamp(min=1e-6))
         elif camera_convention == "world":
@@ -296,65 +224,99 @@ class FeatureExtractor:
         gt_depths = z.squeeze(-1)  # (B,K)
 
         # heatmap targets at input resolution
-        H_in = gt_gt_H = Hgt if Hgt is not None else int(model_out['heatmaps'].shape[2] * self.heatmap_stride)
-        W_in = gt_gt_W = Wgt if Wgt is not None else int(model_out['heatmaps'].shape[3] * self.heatmap_stride)
         # build per-kp gaussian maps at input resolution then downsample to model heatmap resolution
-        ht = make_2d_gaussian_heatmap(H_in, W_in, gt_uv, sigma=self.heatmap_sigma)  # (B,K,H_in,W_in)
+        ht = make_2d_gaussian_heatmap(H, W, gt_uv, sigma=self.heatmap_sigma)  # (B,K,H,W) range: [0,1]
         # downsample target heatmap to model heatmap resolution (using avgpool for stability or bilinear)
-        target_hm = F.interpolate(ht.view(B*K, 1, H_in, W_in), size=model_out['heatmaps'].shape[2:], mode='bilinear', align_corners=False)
-        target_hm = target_hm.view(B, K, target_hm.shape[-2], target_hm.shape[-1])
+        target_hm = F.interpolate(ht.view(B*K, 1, H, W), size=model_out['heatmaps'].shape[-2:], mode='bilinear', align_corners=False) # (B,K,Hh,Wh) range: [0,1]
+        target_hm = target_hm.view(B, K, target_hm.shape[-2], target_hm.shape[-1]) # (B,K,Hh,Wh) range: [0,1]
+        target_hm_grid = torchvision.utils.make_grid(target_hm.view(B*K, 1, target_hm.shape[-2], target_hm.shape[-1]), nrow=K, padding=2, pad_value=0)
+        self.tb_writer.add_image("target_hm_grid", target_hm_grid.cpu(), global_step=self.step_count)
 
         # Heatmap loss (MSE)
-        pred_hm = model_out['heatmaps']
-        heatmap_loss = self.heatmap_loss_fn(pred_hm, target_hm)
+        pred_hm = model_out['heatmaps'] # (B,K,Hh,Wh) range: [0,1]
+        # Apply valid mask to valid samples in the batch
+        if valid_mask is not None:
+            heatmap_loss = self.heatmap_loss_fn(pred_hm[valid_mask], target_hm[valid_mask]) 
+        else:
+            heatmap_loss = self.heatmap_loss_fn(pred_hm, target_hm)
 
         # Coordinate loss: L1 between predicted coords (pixel) and gt_uv (pixel)
-        pred_coords = model_out['coords']  # (B,K,2) pixel coords
-        coord_err = torch.abs(pred_coords - gt_uv)  # (B,K,2)
-        coord_loss_per_kp = coord_err.mean(dim=-1)  # (B,K)
+        pred_coords = model_out['coords']  # (B,K,2) pixel coords, range: [H,W]
+        # Apply valid mask to valid samples in the batch
+        if valid_mask is not None:
+            coord_err = torch.abs(pred_coords[valid_mask] - gt_uv[valid_mask])  # (Bvalid,K,2)
+        else:
+            coord_err = torch.abs(pred_coords - gt_uv)  # (B,K,2)
+        coord_loss_per_kp = coord_err.mean(dim=-1)  # (Bvalid,K)
         coord_loss = coord_loss_per_kp.mean()
 
         # Depth loss: robust L1 with learned logvar if present
         pred_depths = model_out['depths']  # (B,K)
+        # Apply valid mask to valid samples in the batch
         # If model contains logvar param, use uncertainty weighting
-        if hasattr(self.feature_extractor, "depth_logvar"):
-            logvar = self.feature_extractor.depth_logvar  # (K,)
+        # Use unwrapped model to access logvar
+        model_for_logvar = self._model_unwrapped if hasattr(self, '_model_unwrapped') else self.feature_extractor
+        if hasattr(model_for_logvar, "depth_logvar"):
+            logvar = model_for_logvar.depth_logvar  # (K,)
             var = torch.exp(logvar).view(1, K).to(device)
-            depth_res = (pred_depths - gt_depths).abs()  # (B,K)
+            if valid_mask is not None:
+                depth_res = (pred_depths[valid_mask] - gt_depths[valid_mask]).abs()  # (Bvalid,K)
+            else:
+                depth_res = (pred_depths - gt_depths).abs()  # (B,K)
             depth_loss_per_kp = (depth_res / (var + 1e-6)) + 0.5 * torch.log(var + 1e-6)
             depth_loss = depth_loss_per_kp.mean()
         else:
-            depth_loss = self.depth_loss_fn(pred_depths, gt_depths).mean()
+            if valid_mask is not None:
+                depth_loss = self.depth_loss_fn(pred_depths[valid_mask], gt_depths[valid_mask]).mean()
+            else:
+                depth_loss = self.depth_loss_fn(pred_depths, gt_depths).mean()
 
         # Rigidity / edge-length loss: compute pairwise distances of predicted 3D points (reconstruct using pred pixel coords and pred depths)
-        # reconstruct predicted points in camera frame: x = (u-cx) * z / fx , y = (v-cy) * z / fy
         px = pred_coords[..., 0].unsqueeze(-1)  # (B,K,1)
         py = pred_coords[..., 1].unsqueeze(-1)
-        pz = pred_depths.unsqueeze(-1)  # (B,K,1)
-        fx_b = intrinsics[:,0].view(B,1,1)  # (B,1,1)
-        fy_b = intrinsics[:,1].view(B,1,1)
-        cx_b = intrinsics[:,2].view(B,1,1)
-        cy_b = intrinsics[:,3].view(B,1,1)
-        pred_xyz = torch.cat([
-            ( (px - cx_b) * pz / fx_b ),
-            ( (py - cy_b) * pz / fy_b ),
-            pz
-        ], dim=-1)  # (B,K,3)
+        fx = intrinsics[:,0].view(B,1,1)  # (B,1,1)
+        fy = intrinsics[:,1].view(B,1,1)
+        cx = intrinsics[:,2].view(B,1,1)
+        cy = intrinsics[:,3].view(B,1,1)
+
+        pz = -pred_depths.unsqueeze(-1)
+        if camera_convention == "opengl":
+            z = -pz
+            x = (px - cx) * z / fx
+            y = (py - cy) * z / fy
+            # But y = -points_cam[...,1] in projection, so to get points_cam[...,1] use y' = -y
+            # So adjust y to invert:
+            y = -y
+            pred_xyz = torch.cat([x, y, z], dim=-1)
+        elif camera_convention == "ros":
+            # ROS: forward axis: +Z, up axis: -Y
+
+            pred_xyz = torch.cat([
+                (px - cx) * pz / fx,
+                (py - cy) * pz / fy,
+                pz
+            ], dim=-1)
+        elif camera_convention == "world":
+            # World: forward axis: +X, up axis: +Z
+            x = pz
+            y = - (px - cx) * x / fx
+            z_ = - (py - cy) * x / fy
+            pred_xyz = torch.cat([x, y, z_], dim=-1)
+        else:
+            raise ValueError(f"Unknown camera_convention '{camera_convention}', must be one of ('opengl','ros','world')")
+        # NOTE: pred_xyz 就是相机坐标系下的点坐标，这里z轴已经经过了两次负号处理，所以还原回来了.
 
         # compute predicted edge distances
+        if valid_mask is not None:
+            valid_pred_xyz = pred_xyz[valid_mask]
+        else:
+            valid_pred_xyz = pred_xyz
         edge_losses = []
         for idx, (i,j) in enumerate(self._cube_edges):
-            pd = torch.norm(pred_xyz[:, i, :] - pred_xyz[:, j, :], dim=-1)  # (B,)
+            pd = torch.norm(valid_pred_xyz[:, i, :] - valid_pred_xyz[:, j, :], dim=-1)  # (Bvalid,)
             target_d = self._cube_edge_targets[idx].to(device)
             edge_losses.append(((pd - target_d).abs()).mean())
         rigid_loss = torch.stack(edge_losses).mean()
-
-        # apply valid mask (only average over valid envs)
-        if valid_mask is not None:
-            vm = valid_mask.view(-1).to(device)
-            if vm.sum() > 0:
-                # nothing else to do here because per-term losses are already mean over B; if we computed per-sample, we'd mask
-                pass
 
         # total loss weighted
         total_loss = (self.w_heatmap * heatmap_loss) + (self.w_coord * coord_loss) + (self.w_depth * depth_loss) + (self.w_rigid * rigid_loss)
@@ -364,6 +326,7 @@ class FeatureExtractor:
             'coord': coord_loss.detach(),
             'depth': depth_loss.detach(),
             'rigid': rigid_loss.detach(),
+            'target_heatmaps': target_hm.detach(),
         }
         return total_loss, terms, {
             'pred_uv': pred_coords.detach(),
@@ -419,7 +382,7 @@ class FeatureExtractor:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # inputs -> preprocess
         img_input = self._preprocess_images(rgb_img, depth_img)  # (B,H,W,C)
-        B = img_input.shape[0]
+        B, H, W, C = img_input.shape
 
         # log images occasionally
         if self.step_count % 100 == 0 and rgb_img is not None:
@@ -468,7 +431,7 @@ class FeatureExtractor:
                                                                  gt_uv.to(self.device), 
                                                                  intrinsics.to(self.device), 
                                                                  mask, 
-                                                                 camera_convention)
+                                                                 camera_convention, H, W)
 
             # gradient accumulation logic (correct zero_grad / step)
             loss_for_backward = total_loss / float(self.grad_accumulate_steps)
@@ -487,24 +450,49 @@ class FeatureExtractor:
             self.tb_writer.add_scalar("loss/rigid", terms['rigid'].cpu().item(), self.step_count)
             self.tb_writer.add_scalar("training/valid_count", int(mask.sum().item()) if mask is not None else B, self.step_count)
 
-            # Periodic checkpoint
+            # Periodic checkpoint (save only on rank 0 in DDP)
             if (self.step_count % 1000) == 0:
-                ckpt_p = os.path.join(self.log_dir, f"cnn_{self.cfg.input_modality}_{self.step_count}_{terms['total'].numpy(force=True):.4f}.pth")
-                torch.save(self.feature_extractor.state_dict(), ckpt_p)
+                # Save unwrapped model state for DDP compatibility
+                model_to_save = self._model_unwrapped if hasattr(self, '_model_unwrapped') else self.feature_extractor
+                # Only save on rank 0 if in distributed training
+                save_checkpoint = True
+                if torch.distributed.is_initialized():
+                    save_checkpoint = (torch.distributed.get_rank() == 0)
+                if save_checkpoint:
+                    ckpt_p = os.path.join(self.log_dir, f"cnn_{self.cfg.input_modality}_{self.step_count}_{terms['total'].numpy(force=True):.4f}.pth")
+                    torch.save(model_to_save.state_dict(), ckpt_p)
 
             # optionally visualize heatmap & predicted points (first batch sample) to TensorBoard
             if (self.step_count % 200) == 0:
-                # take first sample
-                sample_hm = model_out['heatmaps'][0:1]  # (1,K,h,w)
-                # normalize per heatmap and make grid for TensorBoard
-                hm_min = sample_hm.min()
-                hm_max = sample_hm.max()
-                if hm_max - hm_min > 1e-6:
-                    hm_norm = (sample_hm - hm_min) / (hm_max - hm_min)
+                # Visualize predicted and ground-truth heatmaps for all samples in the batch
+
+                # Predicted heatmaps (B, K, h, w)
+                pred_hm = model_out['heatmaps']  # (B,K,Hh,Wh), range: [0,1]
+                B, K, h, w = pred_hm.shape
+
+                # Ground-truth heatmaps
+                gt_hm = terms['target_heatmaps']  # (B,K,Hh,Wh), range: [0,1]
+
+                # -- Predicted heatmaps grid (normalize per-batch-min/max) --
+                pred_hm_min = pred_hm.min()
+                pred_hm_max = pred_hm.max()
+                if pred_hm_max - pred_hm_min > 1e-6:
+                    pred_hm_norm = (pred_hm - pred_hm_min) / (pred_hm_max - pred_hm_min)
                 else:
-                    hm_norm = sample_hm - hm_min
-                hm_grid = torchvision.utils.make_grid(hm_norm.permute(1,0,2,3), nrow= int(math.ceil(math.sqrt(self.feature_extractor.K))))
-                self.tb_writer.add_image("heatmaps/sample", hm_grid.detach().cpu(), self.step_count)
+                    pred_hm_norm = pred_hm - pred_hm_min
+                pred_hm_grid = torchvision.utils.make_grid(pred_hm_norm.view(B*K, 1, h, w), nrow=K, padding=2)
+                self.tb_writer.add_image("heatmaps/batch_pred", pred_hm_grid.detach().cpu(), self.step_count)
+
+                # -- Ground truth heatmaps grid --
+                if gt_hm is not None:
+                    gt_hm_min = gt_hm.min()
+                    gt_hm_max = gt_hm.max()
+                    if gt_hm_max - gt_hm_min > 1e-6:
+                        gt_hm_norm = (gt_hm - gt_hm_min) / (gt_hm_max - gt_hm_min)
+                    else:
+                        gt_hm_norm = gt_hm - gt_hm_min
+                    gt_hm_grid = torchvision.utils.make_grid(gt_hm_norm.view(B*K, 1, h, w), nrow=K, padding=2)
+                    self.tb_writer.add_image("heatmaps/batch_gt", gt_hm_grid.detach().cpu(), self.step_count)
 
             self.step_count += 1
             # return loss and the predicted pose in camera coordinates (reconstructed 3D points)
@@ -512,47 +500,8 @@ class FeatureExtractor:
             pred_coords = debug_info['pred_uv']  # (B,K,2)
             pred_depths = debug_info['pred_depths']  # (B,K)
             # compute pred_xyz (x = (u-cx)*z/fx, y=(v-cy)*z/fy)
-            fx = intrinsics[:,0].view(B,1,1)
-            fy = intrinsics[:,1].view(B,1,1)
-            cx = intrinsics[:,2].view(B,1,1)
-            cy = intrinsics[:,3].view(B,1,1)
-            px = pred_coords[...,0].unsqueeze(-1)
-            py = pred_coords[...,1].unsqueeze(-1)
-            # NOTE: in the depth-supervision losses, we treat model_predictions model['pred_depths'] as negative, so we have negated it here.
-            pz = -pred_depths.unsqueeze(-1)
-            # Unprojection: compute pred_xyz in camera frame from predicted u,v,z for specified convention
-            # px, py: (B, K, 1) -- u,v
-            # pz: (B, K, 1) -- depth
-            # fx, fy, cx, cy: (B,1,1)
-            if camera_convention == "opengl":
-                # OpenGL: cam x=u, y=v, z=-z
-                x = (px - cx) * pz / fx                      # (B,K,1)
-                y = -(py - cy) * pz / fy                     # (B,K,1)
-                z = -pz                                      # (B,K,1)
-                pred_xyz = torch.cat([x, y, z], dim=-1)      # (B,K,3)
-            elif camera_convention == "ros":
-                # ROS: cam x=u, y=v, z=+z (forward)
-                x = (px - cx) * pz / fx
-                y = -(py - cy) * pz / fy
-                z = pz
-                pred_xyz = torch.cat([x, y, z], dim=-1)
-            elif camera_convention == "world":
-                # "world" convention: cam_right = -y, cam_up = z, cam_forward = x.
-                # Original projection: u = fx*(-y/z)+cx, v = fy*(z/x)+cy, depth = x
-                # To unproject: 
-                # Given u=fx*(-y/z)+cx, v=fy*(z/x)+cy, depth=x
-                # Therefore,
-                #   Let px = u, py = v, pz = x
-                #   -y = (px - cx) * z / fx  => y = - (px - cx) * z / fx
-                #   z = (py - cy) * pz / fy
-                #   x = pz
-                x = pz
-                z_ = (py - cy) * pz / fy
-                y = - (px - cx) * z_ / fx
-                pred_xyz = torch.cat([x, y, z_], dim=-1)
-            else:
-                raise ValueError(f"Unknown camera_convention '{camera_convention}', must be one of ('opengl','ros','world')")
-            pred_obj_pose = pred_xyz.reshape(B, -1).detach()
+         
+            pred_obj_pose = debug_info['pred_xyz'].reshape(B, -1).detach()
             return total_loss.detach(), pred_obj_pose
 
         else:
@@ -565,44 +514,17 @@ class FeatureExtractor:
             pred_coords = model_out['coords']  # (B,K,2)
             pred_depths = model_out['depths']  # (B,K)
             B = pred_coords.shape[0]
-            fx = intrinsics[:,0].view(B,1,1).to(self.device)
-            fy = intrinsics[:,1].view(B,1,1).to(self.device)
-            cx = intrinsics[:,2].view(B,1,1).to(self.device)
-            cy = intrinsics[:,3].view(B,1,1).to(self.device)
-            px = pred_coords[...,0].unsqueeze(-1)
-            py = pred_coords[...,1].unsqueeze(-1)
-            # NOTE: in the depth-supervision losses, we treat model_predictions model['pred_depths'] as negative, so we have negated it here.
-            pz = -pred_depths.unsqueeze(-1)
-            # Compute pred_xyz according to camera_convention as in the training if-branch above
-            if camera_convention == "opengl":
-                # OpenGL: cam x=u, y=v, z=-z
-                x = (px - cx) * pz / fx
-                y = -(py - cy) * pz / fy
-                z = -pz
-                pred_xyz = torch.cat([x, y, z], dim=-1)
-            elif camera_convention == "ros":
-                # ROS: cam x=u, y=v, z=+z (forward)
-                x = (px - cx) * pz / fx
-                y = -(py - cy) * pz / fy
-                z = pz
-                pred_xyz = torch.cat([x, y, z], dim=-1)
-            elif camera_convention == "world":
-                # "world" convention: cam_right = -y, cam_up = z, cam_forward = x.
-                # See the logic in the corresponding if-branch above
-                x = pz
-                z_ = (py - cy) * pz / fy
-                y = - (px - cx) * z_ / fx
-                pred_xyz = torch.cat([x, y, z_], dim=-1)
-            else:
-                raise ValueError(f"Unknown camera_convention '{camera_convention}', must be one of ('opengl','ros','world')")
 
-            predicted_pose = pred_xyz.reshape(B, -1).detach()
-            if gt_pose is not None:
-                # compute MSE for logging (convert both to same device)
-                pose_loss = nn.MSELoss()(predicted_pose, gt_pose.to(self.device))
-            else:
-                pose_loss = torch.tensor(0.0, device=self.device)
-            return pose_loss, predicted_pose
+            model_out = self.feature_extractor(img_input.to(self.device))
+            # compute loss: we pass gt_pose in camera frame (you computed object_pose = _world_to_cam(...))
+            total_loss, terms, debug_info = self._compute_losses(model_out, 
+                                                                 gt_pose.to(self.device), 
+                                                                 gt_uv.to(self.device), 
+                                                                 intrinsics.to(self.device), 
+                                                                 mask, 
+                                                                 camera_convention, H, W)
+            pred_obj_pose = debug_info['pred_xyz'].reshape(B, -1).detach()
+            return total_loss.detach(), pred_obj_pose
 
 import torchvision
 from torchvision.models import resnet50
@@ -714,7 +636,7 @@ class ImprovedResNet50PoseNet(nn.Module):
             nn.Dropout(0.2),
             nn.Linear(128, K)
         )
-        self.depth_logvar = nn.Parameter(torch.zeros(K))
+        # self.depth_logvar = nn.Parameter(torch.zeros(K))
 
         # init lateral/smooth/fuse convs
         for m in [self.lat_c5, self.lat_c4, self.lat_c3, self.smooth4, self.smooth3]:
@@ -800,9 +722,9 @@ class ImprovedResNet50PoseNet(nn.Module):
 
         fused = self.fuse(p3)  # (B,128,Hf,Wf)
 
-        heatmaps = self.heatmap_head(fused)  # low-res
-        heatmaps_up = F.interpolate(heatmaps, size=(H, W), mode='bilinear', align_corners=False)
-        coords_pixel = soft_argmax_2d(heatmaps_up)
+        heatmaps = self.heatmap_head(fused)  # (B,K,Hf,Wf) range: [0,1]
+        heatmaps_up = F.interpolate(heatmaps, size=(H, W), mode='bilinear', align_corners=False) # (B,K,H,W) range: [0,1]
+        coords_pixel = soft_argmax_2d(heatmaps_up) # (B,K,2) pixel coords
 
         depths = self.depth_head(fused)  # (B,K)
 

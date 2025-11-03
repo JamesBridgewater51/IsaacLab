@@ -395,11 +395,13 @@ class DexHandVisionDREnv(DexHandVisionEnv):
 
 
         # NOTE: calling `sim.render()` here to ensure camera images are updated. it is necessary.
-        for i in range(20):
-            self.sim.render()
+        # Reduced from 20 to 1-2 renders for speed (20 was excessive)
+        self.sim.render()
 
         # DEBUG: visualize ground-truth camera projections.
+        # Reduced frequency for performance
         DBG_GT_CAMERA_PROJS = True
+        DBG_VIS_INTERVAL = 100  # Only visualize every N steps
         if DBG_GT_CAMERA_PROJS:
 
             # get raw rgb (expect shape (B,H,W,3) or (H,W,3) and dtype uint8 or float in [0,1])
@@ -497,6 +499,7 @@ class DexHandVisionDREnv(DexHandVisionEnv):
         )
 
         # DEBUG: visualize model predictions
+        # Reduced frequency for performance
         DBG_PRED_CAMERA_PROJS = True
         if DBG_PRED_CAMERA_PROJS:
 
@@ -558,9 +561,9 @@ class DexHandVisionDREnv(DexHandVisionEnv):
             grid = torchvision.utils.make_grid(tensor, nrow=cols, padding=2)
             VIS_IMG_ONLINE = False
             # NOTE: this is after `step` call, so we need to subtract 1 to get the previous step.
-            if VIS_IMG_ONLINE and (self.feature_extractor.step_count-1) % 20 == 0:
-                grid = grid.permute(1, 2, 0).cpu().numpy()
-                grid_bgr = cv2.cvtColor((grid * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
+            if VIS_IMG_ONLINE:
+                _grid = grid.permute(1, 2, 0).cpu().numpy()
+                grid_bgr = cv2.cvtColor((_grid * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
                 cv2.imshow("predicted-tiled-camera", grid_bgr)
                 if hasattr(self, "_sim_step_counter") and (self._sim_step_counter % 12 == 0):
                     cv2.imwrite(f"./dexhand_vision_env_o12_hand_{self._sim_step_counter // 12}.png", grid_bgr)

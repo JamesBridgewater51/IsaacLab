@@ -126,20 +126,20 @@ def _project_and_visible(points_cam: torch.Tensor, fx: float, fy: float, cx: flo
     # Extract coordinates based on convention
     if convention == "opengl":
         # OpenGL: forward axis: -Z, up axis: +Y
-        x = points_cam[..., 0]   # right
-        y = -points_cam[..., 1]   # up
-        z = -points_cam[..., 2]  # depth (negate because forward is -Z)
+        x = points_cam[..., 0]  
+        y = -points_cam[..., 1] 
+        z = -points_cam[..., 2]
     elif convention == "ros":
         # ROS: forward axis: +Z, up axis: -Y
-        x = points_cam[..., 0]   # right
-        y = -points_cam[..., 1]  # up (negate because up is -Y)
-        z = points_cam[..., 2]   # depth (positive forward)
+        x = points_cam[..., 0]  
+        y = points_cam[..., 1] 
+        z = points_cam[..., 2]   
     elif convention == "world":
         # World: forward axis: +X, up axis: +Z
         # Remap: camera_right = -Y, camera_up = +Z, camera_forward = +X
-        x = -points_cam[..., 1]  # right (camera x from world -y)
-        y = points_cam[..., 2]   # up (camera y from world z)
-        z = points_cam[..., 0]   # depth (camera z from world x)
+        x = -points_cam[..., 1]  
+        y = -points_cam[..., 2]  
+        z = points_cam[..., 0]  
     else:
         raise ValueError(f"Unknown convention: {convention}. Must be 'opengl', 'ros', or 'world'")
 
@@ -256,14 +256,10 @@ class DexHandVisionEnvCfg(DexHandEnvCfg):
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1225, env_spacing=2, replicate_physics=True)
 
     # camera
-    # tiled_camera: TiledCameraCfg = TiledCameraCfg(
     tiled_camera: CameraCfg = CameraCfg(
         prim_path="/World/envs/env_.*/Camera",
         # NOTE: 'convention' specifies camera frame convention, so 'pos' is unaffected by convention, 'rot' is affected.
         # NOTE: camera is positioned to look down upon hand-object system.
-        # offset=TiledCameraCfg.OffsetCfg(pos=(0, -0.35, 1.0), rot=(0.7071, 0.0, 0.7071, 0.0), convention="world"), # for shadow hand.
-        # FIXME
-        # offset=TiledCameraCfg.OffsetCfg(pos=(0, -0.1, 0.85), rot=(0.7071, 0.0, 0.7071, 0.0), convention="world"), # for o12 hand.
         offset=CameraCfg.OffsetCfg(pos=(0, -0.1, 0.85), rot=(0.7071, 0.0, 0.7071, 0.0), convention="world"), # for o12 hand.
         data_types=["rgb"],
         spawn=sim_utils.PinholeCameraCfg(
@@ -373,8 +369,8 @@ class DexHandVisionEnv(InHandManipulationRealEnv):
         valid_mask, (u, v, visible) = _project_and_visible(points_cam, fx, fy, cx, cy, W, H, convention=convention)  # (B,)
 
         # NOTE: calling `sim.render()` here to ensure camera images are updated. it is necessary.
-        for i in range(20):
-            self.sim.render()
+        # Reduced from 20 to 1-2 renders for speed (20 was excessive)
+        self.sim.render()
 
         VIS_IMG_ONLINE = False
         if VIS_IMG_ONLINE:
