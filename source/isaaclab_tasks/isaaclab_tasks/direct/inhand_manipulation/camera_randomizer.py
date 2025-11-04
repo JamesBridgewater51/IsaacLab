@@ -970,6 +970,7 @@ class CameraProperties:
     LOOKAT_OBJECT = ((-0.5, 0.5), (-0.5, 0.5), (-0.2, 0.3))  # Focus on objects
     LOOKAT_WORKSPACE = ((-1.0, 1.0), (-1.0, 1.0), (-0.5, 0.5))  # Workspace area
     LOOKAT_WIDE = ((-2.0, 2.0), (-2.0, 2.0), (-1.0, 1.0))  # Wide area
+    LOOKAT_CUBE = ((-0.05, 0.05), (-0.05, 0.05), (0.45, 0.55))  # Focus on cube
 
     # Look-at delta ranges (in meters) - for micro-adjustment mode (默认)
     LOOKAT_DELTA_TINY = ((-0.05, 0.05), (-0.05, 0.05), (-0.05, 0.05))  # Very small direction changes
@@ -1033,18 +1034,10 @@ class CameraPresets:
         """Surveillance/security camera setup with micro-adjustments."""
         return CameraRandomCfg(
             camera_name=camera_name,
-            position=CameraPositionRandomCfg(
-                # Default: micro-adjustment mode
-                delta_range=CameraProperties.DELTA_SMALL,
-                use_delta=True,
-                # Alternative: absolute positioning
-                position_range=CameraProperties.POSITION_MEDIUM,
-                distribution="uniform",
-                enabled=True,
-            ),
+
             orientation=CameraOrientationRandomCfg(
-                # Small rotation adjustments
-                rotation_delta=CameraProperties.ROTATION_DELTA_SMALL,
+                # Use tiny rotation adjustments to prevent cube from drifting out from the image.
+                rotation_delta=CameraProperties.ROTATION_DELTA_TINY,
                 distribution="uniform",
                 enabled=True,
             ),
@@ -1053,7 +1046,7 @@ class CameraPresets:
                 look_at_delta=CameraProperties.LOOKAT_DELTA_SMALL,
                 use_delta=True,
                 # Alternative: absolute look-at
-                look_at_range=CameraProperties.LOOKAT_CENTER,
+                look_at_range=CameraProperties.LOOKAT_CUBE,
                 distribution="uniform",
                 enabled=True,
             ),

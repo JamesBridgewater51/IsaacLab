@@ -36,8 +36,9 @@ def main():
     cfg.tiled_camera.height = 240
     cfg.feature_extractor.train = True
     cfg.feature_extractor.load_checkpoint = False
+    cfg.feature_extractor.checkpoint_path = ""
     cfg.feature_extractor.input_modality = "rgb_only"
-    cfg.feature_extractor.base_dir = os.path.join("runs", f"train_feature_extractor_{time.strftime('%m-%d-%H-%M-%S')}")
+    cfg.feature_extractor.base_dir = os.path.join("runs", args_cli.run_name)
     cfg.feature_extractor.write_image_to_file = False  # set True if you want RGB dumps
     cfg.feature_extractor.save_data_to_file = False  # set True if you want to save data
 

@@ -313,14 +313,25 @@ def randomize_lights(
     allowed_types = ["DistantLight", "CylinderLight", "DomeLight", "SphereLight", "DiskLight", "RectLight"]
 
     # ---------- create lights per env ----------
-    for i in env_ids:
+    # Pre-generate all random values to reduce overhead
+    env_ids_list = list(env_ids) if not isinstance(env_ids, list) else env_ids
+    num_lights_per_env = [random.randint(min_lights, max_lights) for _ in env_ids_list]
+    
+    # Batch ensure roots exist
+    roots_to_create = []
+    for i in env_ids_list:
         root = f"/World/envs/env_{i}/DRLights"
-        # Ensure root exists
         if not stage.GetPrimAtPath(root):
-            UsdGeom.Xform.Define(stage, Sdf.Path(root))
-
-        # choose how many lights to activate
-        K = random.randint(min_lights, max_lights)
+            roots_to_create.append(root)
+    
+    # Create all roots in batch (reduce USD API calls)
+    for root in roots_to_create:
+        UsdGeom.Xform.Define(stage, Sdf.Path(root))
+    
+    # Process environments
+    for idx, i in enumerate(env_ids_list):
+        root = f"/World/envs/env_{i}/DRLights"
+        K = num_lights_per_env[idx]
 
         for j in range(K):
             # Pick a type
@@ -471,35 +482,34 @@ def randomize_material_materialpool(
         f"{NVIDIA_NUCLEUS_DIR}/Materials/Base/Wood/Walnut_Planks/Walnut_Planks_BaseColor.png",
     ]
 
-    # ---- create material pools ----
+    # ---- create material pools (cached, only create once) ----
+    # Check if materials already exist to avoid recreating
     texture_material_paths = []
-    texture_materials = []
     for i in range(num_texture_materials):
-        tex = TEXTURES[i % len(TEXTURES)] if reuse_textures else random.choice(TEXTURES)
-        s = random.uniform(texture_scale_range[0], texture_scale_range[1])
         mat_path = f"/World/Materials/tex_mat_{i}"
-        material = OmniPBR(
-            prim_path=mat_path,
-            texture_path=tex,
-            texture_scale=np.array([s, s]),
-            texture_translate=np.array([0.0, 0.0]),
-        )
+        if not stage.GetPrimAtPath(mat_path).IsValid():
+            tex = TEXTURES[i % len(TEXTURES)] if reuse_textures else random.choice(TEXTURES)
+            s = random.uniform(texture_scale_range[0], texture_scale_range[1])
+            material = OmniPBR(
+                prim_path=mat_path,
+                texture_path=tex,
+                texture_scale=np.array([s, s]),
+                texture_translate=np.array([0.0, 0.0]),
+            )
         texture_material_paths.append(mat_path)
-        texture_materials.append(material)
 
     color_material_paths = []
-    color_materials = []
     for i in range(num_color_materials):
-        color = np.random.rand(3)
         mat_path = f"/World/Materials/color_mat_{i}"
-        material = PreviewSurface(
-            prim_path=mat_path,
-            color=color,
-            roughness=random.uniform(0.1, 0.8),
-            metallic=random.uniform(0.0, 0.3),
-        )
+        if not stage.GetPrimAtPath(mat_path).IsValid():
+            color = np.random.rand(3)
+            material = PreviewSurface(
+                prim_path=mat_path,
+                color=color,
+                roughness=random.uniform(0.1, 0.8),
+                metallic=random.uniform(0.0, 0.3),
+            )
         color_material_paths.append(mat_path)
-        color_materials.append(material)
 
     # ---- helper: choose and bind materials ----
     def _assign_material(root_path: str, use_uniform_color: bool = False):
@@ -524,22 +534,31 @@ def randomize_material_materialpool(
                 meshes.append(p.GetPath().pathString)
         return meshes
 
-    # ---- iterate environments ----
-    for i in map(int, env_ids):
+    # ---- Pre-compute paths and random choices to batch operations ----
+    env_ids_list = list(map(int, env_ids))
+    
+    # Collect all mesh paths first (batch validation)
+    all_mesh_paths = []
+    table_paths = []
+    distractor_roots = []
+    
+    for i in env_ids_list:
         table_root = f"/World/envs/env_{i}/Table"
-        # robot_root = f"/World/envs/env_{i}/Robot"
         dis_root = f"/World/envs/env_{i}/distractors"
-
-        # root_prim = stage.GetPrimAtPath(robot_root)
-        # assert root_prim.IsValid(), "robot root not found"
-
+        
         if stage.GetPrimAtPath(table_root).IsValid():
-            _assign_material(table_root)
-        # if stage.GetPrimAtPath(robot_root).IsValid():
-        #     _assign_material(robot_root, use_uniform_color=True)
+            table_paths.append(table_root)
+        
         if stage.GetPrimAtPath(dis_root).IsValid():
-            for mesh_path in _list_mesh_paths(dis_root):
-                _assign_material(mesh_path)
+            distractor_roots.append(dis_root)
+            all_mesh_paths.extend(_list_mesh_paths(dis_root))
+
+    # Batch assign materials
+    for table_path in table_paths:
+        _assign_material(table_path)
+    
+    for mesh_path in all_mesh_paths:
+        _assign_material(mesh_path)
 
     # ---- floor ----
     floor_root = "/World/ground"

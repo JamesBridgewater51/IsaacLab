@@ -16,6 +16,10 @@ from isaaclab.utils import configclass
 import math
 from typing import Literal
 
+import torchvision
+from torchvision.models import resnet50
+from torchvision.models import ResNet50_Weights
+HAS_WEIGHTS_ENUM = True
 
 
 # --- Add helper functions inside the file/module (outside class) ---
@@ -129,13 +133,13 @@ class FeatureExtractor:
         # Replace the model with the improved net (if available). fallback to old network.
         # ImprovedIntrinsicsAwarePoseNet should be in scope (from previous cell or module)
         # fallback to simpler network you had
-        self.feature_extractor = ImprovedResNet50PoseNet(input_modality=cfg.input_modality, use_coord=False, use_film=False)
+        self.feature_extractor = ImprovedResNet50PoseNet(input_modality=cfg.input_modality, use_coord=False, use_film=False, use_intrinsics_in_context=True)
 
         self.feature_extractor.to(self.device)
 
         # training bookkeeping
         self.step_count = 0
-        self.grad_accumulate_steps = getattr(self.cfg, "grad_accumulate_steps", 8)
+        self.grad_accumulate_steps = getattr(self.cfg, "grad_accumulate_steps", 20)
 
         # log dir + tb writer
         self.log_dir = os.path.join(self.cfg.base_dir or ".", "logs")
@@ -203,6 +207,51 @@ class FeatureExtractor:
         valid_mask: boolean (B,) whether env is valid for training
         returns: total_loss (scalar), dict of terms for logging
         """
+        pred_coords = model_out['coords']
+        pred_depths = model_out['depths']
+        B = pred_coords.shape[0]
+        K = pred_coords.shape[1]
+        device = pred_coords.device
+
+        px = pred_coords[..., 0].unsqueeze(-1)
+        py = pred_coords[..., 1].unsqueeze(-1)
+        fx = intrinsics[:,0].view(B,1,1)
+        fy = intrinsics[:,1].view(B,1,1)
+        cx = intrinsics[:,2].view(B,1,1)
+        cy = intrinsics[:,3].view(B,1,1)
+        pz = -pred_depths.unsqueeze(-1)
+        if camera_convention == "opengl":
+            z = -pz
+            x = (px - cx) * z / fx
+            y = (py - cy) * z / fy
+            y = -y
+            pred_xyz = torch.cat([x, y, z], dim=-1)
+        elif camera_convention == "ros":
+            pred_xyz = torch.cat([
+                (px - cx) * pz / fx,
+                (py - cy) * pz / fy,
+                pz
+            ], dim=-1)
+        elif camera_convention == "world":
+            x = pz
+            y = - (px - cx) * x / fx
+            z_ = - (py - cy) * x / fy
+            pred_xyz = torch.cat([x, y, z_], dim=-1)
+        else:
+            raise ValueError(f"Unknown camera_convention '{camera_convention}', must be one of ('opengl','ros','world')")
+
+        # If gt_pose_cam and gt_uv are not available, only return pred values, skip loss computation
+        if gt_pose_cam is None or gt_uv is None:
+            debug_info = {
+                'pred_uv': pred_coords.detach(),
+                'gt_uv': None,
+                'pred_depths': pred_depths.detach(),
+                'gt_depths': None,
+                'pred_xyz': pred_xyz.detach(),
+                'gt_xyz': None
+            }
+            return torch.tensor(0.0, device=device, dtype=torch.float32), {}, debug_info
+
         B = gt_pose_cam.shape[0]
         device = gt_pose_cam.device
         K = model_out['coords'].shape[1]
@@ -417,14 +466,9 @@ class FeatureExtractor:
             self.feature_extractor.train()
 
             # If intrinsics provided in model_kwargs, pass it; otherwise assume intrinsics come from env
-            intrinsics = model_kwargs.get("intrinsics", None)
-            if intrinsics is None:
-                # fallback: try to compute from cfg camera settings (not ideal)
-                raise ValueError("intrinsics must be provided in model_kwargs during training (B,4)")
-
+            intrinsics = model_kwargs['intrinsics']
             # forward pass
-            # model_out = self.feature_extractor(img_input.to(self.device), intrinsics.to(self.device))
-            model_out = self.feature_extractor(img_input.to(self.device))
+            model_out = self.feature_extractor(img_input.to(self.device), intrinsics.to(self.device))
             # compute loss: we pass gt_pose in camera frame (you computed object_pose = _world_to_cam(...))
             total_loss, terms, debug_info = self._compute_losses(model_out, 
                                                                  gt_pose.to(self.device), 
@@ -507,43 +551,40 @@ class FeatureExtractor:
         else:
             # inference mode
             self.feature_extractor.eval()
-            intrinsics = model_kwargs.get("intrinsics", None)
-            # model_out = self.feature_extractor(img_input.to(self.device), intrinsics.to(self.device) if intrinsics is not None else None)
-            model_out = self.feature_extractor(img_input.to(self.device))
+            intrinsics = model_kwargs["intrinsics"]
+            model_out = self.feature_extractor(img_input.to(self.device), intrinsics.to(self.device))
             # reconstruct pred_xyz
             pred_coords = model_out['coords']  # (B,K,2)
             pred_depths = model_out['depths']  # (B,K)
             B = pred_coords.shape[0]
 
-            model_out = self.feature_extractor(img_input.to(self.device))
             # compute loss: we pass gt_pose in camera frame (you computed object_pose = _world_to_cam(...))
             total_loss, terms, debug_info = self._compute_losses(model_out, 
-                                                                 gt_pose.to(self.device), 
-                                                                 gt_uv.to(self.device), 
-                                                                 intrinsics.to(self.device), 
-                                                                 mask, 
-                                                                 camera_convention, H, W)
+                                                                gt_pose.to(self.device) if gt_pose is not None else None, 
+                                                                gt_uv.to(self.device) if gt_uv is not None else None, 
+                                                                intrinsics.to(self.device), 
+                                                                mask, 
+                                                                camera_convention, H, W) 
+
             pred_obj_pose = debug_info['pred_xyz'].reshape(B, -1).detach()
             return total_loss.detach(), pred_obj_pose
 
-import torchvision
-from torchvision.models import resnet50
-from torchvision.models import ResNet50_Weights
-HAS_WEIGHTS_ENUM = True
 
 class ImprovedResNet50PoseNet(nn.Module):
     """
-    ResNet-50 backbone (pretrained) + FPN lateral fusion + FiLM conditioning (context-only) + heatmap+depth heads.
-    forward(x) accepts only images: x shape (B,H,W,C) or (B,C,H,W), no intrinsics required.
+    ResNet-50 backbone (pretrained) + FPN lateral fusion + FiLM conditioning (context-only or with intrinsics) + heatmap+depth heads.
+    Now supports optional injection of camera intrinsics information (fx, fy, cx, cy).
+    forward(x, intrinsics=None) takes image and optional intrinsics tensor of shape (B,4).
     If use_coord=True, simple normalized pixel coords are concatenated (no intrinsics).
     Predicts K keypoints via heatmaps + soft-argmax and K depths.
     """
-    def __init__(self, K=9, input_modality='rgb_depth', use_coord=True, use_film=True, pretrained=True):
+    def __init__(self, K=9, input_modality='rgb_depth', use_coord=True, use_film=True, pretrained=True, use_intrinsics_in_context=True):
         super().__init__()
         self.K = K
         self.input_modality = input_modality
         self.use_coord = use_coord
         self.use_film = use_film
+        self.use_intrinsics_in_context = use_intrinsics_in_context
 
         # Determine expected input channels (image-only pipeline)
         in_ch = 0
@@ -595,17 +636,16 @@ class ImprovedResNet50PoseNet(nn.Module):
         self.smooth4 = nn.Conv2d(lateral, lateral, kernel_size=3, padding=1)
         self.smooth3 = nn.Conv2d(lateral, lateral, kernel_size=3, padding=1)
 
-        # context MLP from layer4 pooled features (no intrinsics used)
-        self.context_conv = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Flatten(),
-            nn.Linear(in_c5, 128),
+        # context MLP from layer4 pooled features (optionally with intrinsics)
+        context_in_dim = in_c5 + (4 if self.use_intrinsics_in_context else 0)
+        self.context_mlp = nn.Sequential(
+            nn.Linear(context_in_dim, 128),
             nn.ReLU(inplace=True)
         )
 
-        # FiLM MLPs (context-only: pooled context used). They output 2*C params per lateral.
+        # FiLM MLPs (can be conditioned on contextual pooled+intrinsics if enabled)
         if self.use_film:
-            film_in_dim = 128  # only pooled context (no intrinsics)
+            film_in_dim = 128  # only pooled context after self.context_conv, with/without intrinsics
             self.film_mlps = nn.ModuleList([
                 make_film_mlp(film_in_dim, lateral * 2),  # for layer2 -> lat_c3
                 make_film_mlp(film_in_dim, lateral * 2),  # for layer3 -> lat_c4
@@ -636,7 +676,6 @@ class ImprovedResNet50PoseNet(nn.Module):
             nn.Dropout(0.2),
             nn.Linear(128, K)
         )
-        # self.depth_logvar = nn.Parameter(torch.zeros(K))
 
         # init lateral/smooth/fuse convs
         for m in [self.lat_c5, self.lat_c4, self.lat_c3, self.smooth4, self.smooth3]:
@@ -656,10 +695,11 @@ class ImprovedResNet50PoseNet(nn.Module):
         beta  = gamma_beta[:,1].view(B,C,1,1)
         return feat * (1.0 + gamma) + beta
 
-    def forward(self, x):
+    def forward(self, x, intrinsics=None):
         """
-        x: (B,H,W,C) or (B,C,H,W) image tensor only. No intrinsics.
-        returns dict with 'heatmaps','coords','depths','pooled_context'
+        x: (B,H,W,C) or (B,C,H,W) image tensor.
+        intrinsics (optional): (B, 4) tensor of fx, fy, cx, cy.
+        returns dict with 'heatmaps', 'coords', 'depths', 'pooled_context'
         """
         # accept channel-last
         if x.ndim == 4 and x.shape[-1] in (1,3,4):
@@ -677,12 +717,11 @@ class ImprovedResNet50PoseNet(nn.Module):
         if self.use_coord:
             device = x.device
             dtype = x.dtype
-            # normalized coords in [-1, 1]
             xs = torch.linspace(-1.0, 1.0, W, device=device, dtype=dtype)
             ys = torch.linspace(-1.0, 1.0, H, device=device, dtype=dtype)
-            grid_x, grid_y = torch.meshgrid(xs, ys, indexing='xy')  # grid_x: (W,H)
-            grid_x = grid_x.t().unsqueeze(0).unsqueeze(0).expand(B,1,H,W)  # (B,1,H,W)
-            grid_y = grid_y.t().unsqueeze(0).unsqueeze(0).expand(B,1,H,W)
+            grid_x, grid_y = torch.meshgrid(xs, ys, indexing='xy')  # grid_x: (H,W)
+            grid_x = grid_x.unsqueeze(0).unsqueeze(0).expand(B,1,H,W)  # (B,1,H,W)
+            grid_y = grid_y.unsqueeze(0).unsqueeze(0).expand(B,1,H,W)
             coord = torch.cat([grid_x, grid_y], dim=1)
             x = torch.cat([x, coord], dim=1)
 
@@ -696,9 +735,19 @@ class ImprovedResNet50PoseNet(nn.Module):
         layer3 = self.backbone.layer3(layer2)  # /16
         layer4 = self.backbone.layer4(layer3)  # /32
 
-        pooled = self.context_conv(layer4)  # (B,128)
+        pooled_raw = F.adaptive_avg_pool2d(layer4, 1).reshape(B, -1)  # (B, in_c5)
 
-        # FiLM using pooled context only (no intrinsics)
+        # Optionally concatenate intrinsics to context vector for conditioning
+        if self.use_intrinsics_in_context and intrinsics is not None:
+            if intrinsics.shape[0] != B or intrinsics.shape[1] != 4:
+                raise ValueError(f"intrinsics must be (B,4); got {intrinsics.shape}")
+            pooled_context_input = torch.cat([pooled_raw, intrinsics.to(pooled_raw.device, pooled_raw.dtype)], dim=1) # (B, in_c5 + 4)
+        else:
+            pooled_context_input = pooled_raw # (B, in_c5)
+
+        pooled = self.context_mlp(pooled_context_input)  # (B,128)
+
+        # FiLM using pooled context (optionally with intrinsics if provided)
         if self.use_film:
             f3 = self.film_mlps[0](pooled)
             f4 = self.film_mlps[1](pooled)

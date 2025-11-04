@@ -25,6 +25,10 @@ from .dexhand_vision_env import DexHandEnvCfg, DexHandVisionEnv, DexHandVisionEn
 import numpy as np
 import cv2
 import torchvision
+import torchvision.transforms as T
+import kornia.augmentation as K_aug
+import kornia.filters as KF
+import kornia
 
 from pxr import UsdGeom, Usd, Gf, Sdf
 
@@ -92,18 +96,18 @@ class DRCfg:
 
         # Randomise distractor spawn and placement on reset.  All
         # parameters default to the values stored on the configuration.
-        # "distractors": EventTermCfg(
-        #     func=randomize_distractors,
-        #     mode="reset",
-        #     params={},
-        # ),
+        "distractors": EventTermCfg(
+            func=randomize_distractors,
+            mode="reset",
+            params={},
+        ),
         # Randomise camera pose and FOV on reset.  Parameters are read
         # from the configuration if omitted.
-        # "camera": EventTermCfg(
-        #     func=randomize_camera,
-        #     mode="reset",
-        #     params={},
-        # ),
+        "camera": EventTermCfg(
+            func=randomize_camera,
+            mode="reset",
+            params={},
+        ),
         # Randomise lights on reset.  Defaults are taken from the
         # configuration.
         "lights": EventTermCfg(
@@ -149,7 +153,7 @@ class DexHandVisionDREnv(DexHandVisionEnv):
         self._spawn_tables_for_all_envs()
         self._ensure_distractor_roots()
         self._ensure_light_roots()
-        # self._ensure_camera_randomizer()
+        self._ensure_camera_randomizer()
 
         self.event_manager = EventManager(self.cfg.dr.events, self)
 
@@ -398,6 +402,91 @@ class DexHandVisionDREnv(DexHandVisionEnv):
         # Reduced from 20 to 1-2 renders for speed (20 was excessive)
         self.sim.render()
 
+        # # 4) Train CNN with visibility mask
+        if hasattr(self, "camera_randomizer") and self.camera_randomizer is not None:
+            object_pose = world_to_cam_batch(object_pose.reshape(-1, 9, 3), cam_off_pos, cam_quat)  # (B,9,3)
+            intrinsics = torch.zeros((self.num_envs, 4)).float().to(self.device)
+            intrinsics[:, 0] = fx.to(self.device)
+            intrinsics[:, 1] = fy.to(self.device)
+            intrinsics[:, 2] = cx.to(self.device)
+            intrinsics[:, 3] = cy.to(self.device)
+            model_kwargs = {"intrinsics": intrinsics}
+        else:
+            object_pose = _world_to_cam(object_pose.reshape(-1, 9, 3), cam_off_pos, cam_quat)  # (B,9,3)
+            model_kwargs = {
+                "intrinsics": torch.tensor([fx, fy, cx, cy], dtype=torch.float32, device=self.device).unsqueeze(0).expand(self.num_envs, -1)  # (B,4)
+            }
+
+        object_pose = object_pose.reshape(-1, 27)  # (B,27)
+        # --------------------------------------------------------
+        # [STEP 1] Grab the RGB image (batched, expected shape (B, H, W, 3), dtype float or uint8)
+        rgb_img = self._tiled_camera.data.output["rgb"]
+        # Ensure torch.Tensor and on correct device
+        if not torch.is_tensor(rgb_img):
+            rgb_img = torch.from_numpy(rgb_img)
+        rgb_img = rgb_img.to(self.device)
+        # Shape: (B, H, W, 3)
+        # If uint8, convert to float32
+        if rgb_img.dtype == torch.uint8:
+            rgb_img = rgb_img.float() / 255.0
+        elif rgb_img.max() > 1.0:
+            rgb_img = rgb_img / 255.0  # If not strictly uint8 but range is [0,255]
+        # Clamp to [0,1]
+        rgb_img = rgb_img.clamp(0, 1)
+
+        USE_DATA_AUG = False
+        if USE_DATA_AUG:
+            # --------------------------------------------------------
+            # [STEP 2] Compose augmentations
+            # We'll use Kornia and TorchVision for strong geometric, color, noise, and randomizations.
+
+            B, H, W, C = rgb_img.shape
+            
+            # If using Kornia, we need CHW:
+            img_chw = rgb_img.permute(0,3,1,2).contiguous()  # (B,3,H,W)
+
+            # Select at most three random augmentations from the pool to apply in sequence
+            # Only choose augmentations that do not change global spatial arrangement or resolution,
+            # i.e., pixel-wise or local intensity/appearance changes (safe for keypoint supervisions)
+            # Remove augmentations that alter color/contrast/intensity in a way that would affect cube face color:
+            # Keep only things that do not change global pixel values or alter color/contrast:
+            possible_augs = [
+                K_aug.RandomGaussianBlur((3,5), (0.2,1.2), p=0.7),
+                K_aug.RandomMotionBlur(kernel_size=9, angle=30., direction=1.0, p=0.5),
+                K_aug.RandomGaussianNoise(mean=0.0, std=0.07, p=0.7),
+                K_aug.RandomPlasmaShadow(roughness=(0.12, 0.4), shade_intensity=(-0.2, 0.0), shade_quantity=(0.0, 0.5), p=0.12),
+                K_aug.RandomErasing(scale=(0.02,0.18), ratio=(0.3,3.3), p=0.5, value=0.0),
+            ]
+            # Randomly sample at most three augmentations from the pool
+            num_augs = min(3, len(possible_augs))
+            chosen_augs = random.sample(possible_augs, k=num_augs)
+            aug_transforms = torch.nn.Sequential(*chosen_augs)
+            img_aug = aug_transforms(img_chw)
+
+            # Add subtle sharpening sometimes
+            if torch.rand(1).item() < 0.2:
+                # Apply unsharp mask to a random batch subset
+                batch_indices = torch.randperm(B)[:max(1, B // 2)]
+                for bi in batch_indices:
+                    img_aug[bi:bi+1] = KF.unsharp_mask(img_aug[bi:bi+1], kernel_size=(3,3), sigma=(0.5,0.8))
+
+            # Ensure still in [0,1]
+            img_aug = img_aug.clamp(0,1)
+
+            # (Optional) channel shuffle (permute color planes)
+            if torch.rand(1).item() < 0.15:
+                perm = torch.randperm(3)
+                img_aug = img_aug[:, perm, :, :]
+
+            # Make sure no NaNs and shape is correct
+            img_aug = torch.nan_to_num(img_aug, nan=0.0, posinf=1.0, neginf=0.0)
+            img_aug = img_aug.clamp(0,1)
+
+            # Return CHW=>HWC, float32 in [0, 1] just like original expects
+            rgb_img_input = img_aug.permute(0,2,3,1).contiguous()
+        else:
+            rgb_img_input = rgb_img.clone()
+
         # DEBUG: visualize ground-truth camera projections.
         # Reduced frequency for performance
         DBG_GT_CAMERA_PROJS = True
@@ -405,7 +494,7 @@ class DexHandVisionDREnv(DexHandVisionEnv):
         if DBG_GT_CAMERA_PROJS:
 
             # get raw rgb (expect shape (B,H,W,3) or (H,W,3) and dtype uint8 or float in [0,1])
-            image_raw = self._tiled_camera.data.output["rgb"]
+            image_raw = rgb_img_input.clone()
 
             # get projected coords and visibility (u, v are torch tensors from _project_and_visible)
             u_np = u.detach().cpu().numpy()
@@ -458,7 +547,7 @@ class DexHandVisionDREnv(DexHandVisionEnv):
             tensor = torch.from_numpy(image).permute(0, 3, 1, 2)  # (B,C,H,W)
             cols = int(math.ceil(math.sqrt(n_imgs)))
             grid = torchvision.utils.make_grid(tensor, nrow=cols, padding=2) # (C,H,W)
-            VIS_IMG_ONLINE = False
+            VIS_IMG_ONLINE = True
             if VIS_IMG_ONLINE:
                 _grid = grid.permute(1, 2, 0).cpu().numpy() # (H,W,C)
                 grid_bgr = cv2.cvtColor((_grid * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
@@ -471,28 +560,14 @@ class DexHandVisionDREnv(DexHandVisionEnv):
             if WRITE_TB and self.feature_extractor.step_count % 20 == 0:
                 self.feature_extractor.tb_writer.add_image("ground-truth-tiled-camera", grid, global_step=self.feature_extractor.step_count)
 
-        # # 4) Train CNN with visibility mask
-        if hasattr(self, "camera_randomizer") and self.camera_randomizer is not None:
-            object_pose = world_to_cam_batch(object_pose.reshape(-1, 9, 3), cam_off_pos, cam_quat)  # (B,9,3)
-            intrinsics = torch.zeros((self.num_envs, 4)).float().to(self.device)
-            intrinsics[:, 0] = fx.to(self.device)
-            intrinsics[:, 1] = fy.to(self.device)
-            intrinsics[:, 2] = cx.to(self.device)
-            intrinsics[:, 3] = cy.to(self.device)
-            model_kwargs = {"intrinsics": intrinsics}
-        else:
-            object_pose = _world_to_cam(object_pose.reshape(-1, 9, 3), cam_off_pos, cam_quat)  # (B,9,3)
-            model_kwargs = {
-                "intrinsics": torch.tensor([fx, fy, cx, cy], dtype=torch.float32, device=self.device).unsqueeze(0).expand(self.num_envs, -1)  # (B,4)
-            }
 
-        object_pose = object_pose.reshape(-1, 27)  # (B,27)
-        
+        # --------------------------------------------------------
+        # [STEP 3] Forward to feature extractor with augmented input
         pose_loss, pred_obj_pose = self.feature_extractor.step(
-            rgb_img=self._tiled_camera.data.output["rgb"],
+            rgb_img=(rgb_img_input * 255.0).clamp(0, 255).to(torch.uint8),
             depth_img=None,
             gt_pose=object_pose,
-            gt_uv=torch.stack([u,v],dim=-1),
+            gt_uv=torch.stack([u, v], dim=-1),
             mask=valid_mask,
             model_kwargs=model_kwargs,
             camera_convention=self.cfg.tiled_camera.offset.convention,
@@ -503,10 +578,10 @@ class DexHandVisionDREnv(DexHandVisionEnv):
         DBG_PRED_CAMERA_PROJS = True
         if DBG_PRED_CAMERA_PROJS:
 
-            valid_mask, (u, v, visible) = _project_and_visible(pred_obj_pose.reshape(-1, 9, 3), fx, fy, cx, cy, W, H, convention=convention)  # (B,)
+            valid_mask, (u, v, visible) = _project_and_visible(pred_obj_pose.reshape(-1, 9, 3), fx, fy, cx, cy, W, H, convention=self.cfg.tiled_camera.offset.convention)  # (B,)
             
             # get raw rgb (expect shape (B,H,W,3) or (H,W,3) and dtype uint8 or float in [0,1])
-            image_raw = self._tiled_camera.data.output["rgb"]
+            image_raw = rgb_img_input.clone()
 
             # get projected coords and visibility (u, v are torch tensors from _project_and_visible)
             u_np = u.detach().cpu().numpy()
@@ -559,7 +634,7 @@ class DexHandVisionDREnv(DexHandVisionEnv):
             tensor = torch.from_numpy(image).permute(0, 3, 1, 2)  # (B,C,H,W)
             cols = int(math.ceil(math.sqrt(n_imgs)))
             grid = torchvision.utils.make_grid(tensor, nrow=cols, padding=2)
-            VIS_IMG_ONLINE = False
+            VIS_IMG_ONLINE = True
             # NOTE: this is after `step` call, so we need to subtract 1 to get the previous step.
             if VIS_IMG_ONLINE:
                 _grid = grid.permute(1, 2, 0).cpu().numpy()
