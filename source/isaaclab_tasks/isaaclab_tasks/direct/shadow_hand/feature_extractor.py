@@ -155,13 +155,15 @@ class FeatureExtractor:
             self.feature_extractor.load_state_dict(state)
 
         # losses & optimizer
+        # NOTE: we define losses function no matter train or inference.
+        self.heatmap_loss_fn = nn.MSELoss(reduction='mean')
+        self.coord_loss_fn   = nn.L1Loss(reduction='none')  # compute per-keypoint then mask
+        self.depth_loss_fn   = nn.L1Loss(reduction='none')
+
         if self.cfg.train:
             # optimizer with weight decay (AdamW recommended)
             self.optimizer = torch.optim.AdamW(self.feature_extractor.parameters(), lr=getattr(self.cfg, "lr", 3e-4), weight_decay=1e-4)
             # losses: heatmap MSE, coord L1, depth L1; we keep a per-keypoint depth logvar inside model (depth_logvar)
-            self.heatmap_loss_fn = nn.MSELoss(reduction='mean')
-            self.coord_loss_fn   = nn.L1Loss(reduction='none')  # compute per-keypoint then mask
-            self.depth_loss_fn   = nn.L1Loss(reduction='none')
             self.feature_extractor.train()
             # Support for DDP: check if model is wrapped
             self._is_ddp = isinstance(self.feature_extractor, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel))

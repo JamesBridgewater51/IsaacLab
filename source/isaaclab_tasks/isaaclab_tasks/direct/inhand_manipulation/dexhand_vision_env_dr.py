@@ -30,6 +30,10 @@ import kornia.augmentation as K_aug
 import kornia.filters as KF
 import kornia
 
+import kornia.augmentation as K_aug
+import kornia.filters as KF
+import kornia.enhance as Kenh
+
 from pxr import UsdGeom, Usd, Gf, Sdf
 
 # ---------------------------------------------------------------------
@@ -364,10 +368,11 @@ class DexHandVisionDREnv(DexHandVisionEnv):
             # Ensure gt_keypoints is (B, K, 3) in same device/dtype
             object_pose = torch.cat([self.object_pos, self.gt_keypoints.view(-1, 24)], dim=-1)
             points_world = object_pose.reshape(-1, 9, 3)
+            # FIXME: the `world_to_cam_batch` should consider camera convention seriously, but currently we set convention as 'opengl' in _project_and_visible to circumvent this problem.
             points_cam = world_to_cam_batch(points_world, cam_off_pos, cam_quat)  # (B,K,3)
 
             # 7) Project and test visibility
-            # NOTE: convention is "ros", since camera rnaomizer calls external isaaclab API
+            # NOTE: convention is "opengl" instead of self.cfg.tiled_camera.offset.convention, since camera rnaomizer calls external isaaclab API
             valid_mask, (u, v, visible) = _project_and_visible(points_cam, fx, fy, cx, cy, W, H, convention="opengl")  # (B,)
 
             # convert valid_mask into same device/dtype as other tensors
@@ -394,8 +399,7 @@ class DexHandVisionDREnv(DexHandVisionEnv):
             points_cam = _world_to_cam(points_world, cam_off_pos, cam_quat)  # (B,8,3)
 
             # 3.4) Project and test visibility
-            convention = self.cfg.tiled_camera.offset.convention
-            valid_mask, (u, v, visible) = _project_and_visible(points_cam, fx, fy, cx, cy, W, H, convention=convention)  # (B,)
+            valid_mask, (u, v, visible) = _project_and_visible(points_cam, fx, fy, cx, cy, W, H, convention=self.cfg.tiled_camera.offset.convention)  # (B,)
 
 
         # NOTE: calling `sim.render()` here to ensure camera images are updated. it is necessary.
@@ -437,53 +441,60 @@ class DexHandVisionDREnv(DexHandVisionEnv):
         USE_DATA_AUG = False
         if USE_DATA_AUG:
             # --------------------------------------------------------
-            # [STEP 2] Compose augmentations
-            # We'll use Kornia and TorchVision for strong geometric, color, noise, and randomizations.
+            # [STEP 2] Compose augmentations using kornia.enhance and safe Kornia augmentations
+            # Avoid color or contrast changes as cube color fidelity is crucial.
+            # Only spatially safe and appearance-safe pixel noise/blur allowed.
+
 
             B, H, W, C = rgb_img.shape
-            
-            # If using Kornia, we need CHW:
-            img_chw = rgb_img.permute(0,3,1,2).contiguous()  # (B,3,H,W)
+            img_chw = rgb_img.permute(0, 3, 1, 2).contiguous()  # (B,3,H,W)
 
-            # Select at most three random augmentations from the pool to apply in sequence
-            # Only choose augmentations that do not change global spatial arrangement or resolution,
-            # i.e., pixel-wise or local intensity/appearance changes (safe for keypoint supervisions)
-            # Remove augmentations that alter color/contrast/intensity in a way that would affect cube face color:
-            # Keep only things that do not change global pixel values or alter color/contrast:
-            possible_augs = [
-                K_aug.RandomGaussianBlur((3,5), (0.2,1.2), p=0.7),
+            # Define safe augmentations:
+            safe_augs = [
+                K_aug.RandomGaussianBlur((3, 5), (0.2, 1.2), p=0.7),
                 K_aug.RandomMotionBlur(kernel_size=9, angle=30., direction=1.0, p=0.5),
                 K_aug.RandomGaussianNoise(mean=0.0, std=0.07, p=0.7),
                 K_aug.RandomPlasmaShadow(roughness=(0.12, 0.4), shade_intensity=(-0.2, 0.0), shade_quantity=(0.0, 0.5), p=0.12),
-                K_aug.RandomErasing(scale=(0.02,0.18), ratio=(0.3,3.3), p=0.5, value=0.0),
             ]
+
             # Randomly sample at most three augmentations from the pool
-            num_augs = min(3, len(possible_augs))
-            chosen_augs = random.sample(possible_augs, k=num_augs)
+            num_augs = min(3, len(safe_augs))
+            chosen_augs = random.sample(safe_augs, k=num_augs)
             aug_transforms = torch.nn.Sequential(*chosen_augs)
             img_aug = aug_transforms(img_chw)
 
-            # Add subtle sharpening sometimes
-            if torch.rand(1).item() < 0.2:
-                # Apply unsharp mask to a random batch subset
+            # Randomly apply some pixel-level intensity/structural augmentation with kornia.enhance
+
+                # 2. Subtle per-batch gamma perturbation
+            if torch.rand(1).item() < 0.25:
+                gamma = float(torch.empty(1).uniform_(0.90, 1.10))
+                img_aug = Kenh.adjust_gamma(img_aug, gamma)
+                img_aug = img_aug.clamp(0, 1)
+
+            # 3. Random mild sharpness (for some batch elements)
+            if torch.rand(1).item() < 0.20:
                 batch_indices = torch.randperm(B)[:max(1, B // 2)]
                 for bi in batch_indices:
-                    img_aug[bi:bi+1] = KF.unsharp_mask(img_aug[bi:bi+1], kernel_size=(3,3), sigma=(0.5,0.8))
+                    # Use kornia.enhance.sharpness (factor~1.1-1.3 for subtle increase)
+                    factor = float(torch.empty(1).uniform_(1.08, 1.25))
+                    img_aug[bi:bi + 1] = Kenh.sharpness(img_aug[bi:bi + 1], factor)
 
-            # Ensure still in [0,1]
-            img_aug = img_aug.clamp(0,1)
+            # 4. Random (safe) brightness jitter (additive, small)
+            if torch.rand(1).item() < 0.20:
+                factor = float(torch.empty(1).uniform_(0.01, 0.07))
+                sign = 1.0 if torch.rand(1).item() < 0.5 else -1.0
+                img_aug = Kenh.adjust_brightness(img_aug, sign * factor)
+                img_aug = img_aug.clamp(0, 1)
 
-            # (Optional) channel shuffle (permute color planes)
-            if torch.rand(1).item() < 0.15:
+            # 5. Optional random spatial channel shuffle (rare, safe)
+            if torch.rand(1).item() < 0.10:
                 perm = torch.randperm(3)
                 img_aug = img_aug[:, perm, :, :]
 
-            # Make sure no NaNs and shape is correct
+            # Remove NaNs/infs, clamp
             img_aug = torch.nan_to_num(img_aug, nan=0.0, posinf=1.0, neginf=0.0)
-            img_aug = img_aug.clamp(0,1)
-
-            # Return CHW=>HWC, float32 in [0, 1] just like original expects
-            rgb_img_input = img_aug.permute(0,2,3,1).contiguous()
+            img_aug = img_aug.clamp(0, 1)
+            rgb_img_input = img_aug.permute(0, 2, 3, 1).contiguous()
         else:
             rgb_img_input = rgb_img.clone()
 
@@ -547,7 +558,7 @@ class DexHandVisionDREnv(DexHandVisionEnv):
             tensor = torch.from_numpy(image).permute(0, 3, 1, 2)  # (B,C,H,W)
             cols = int(math.ceil(math.sqrt(n_imgs)))
             grid = torchvision.utils.make_grid(tensor, nrow=cols, padding=2) # (C,H,W)
-            VIS_IMG_ONLINE = True
+            VIS_IMG_ONLINE = False
             if VIS_IMG_ONLINE:
                 _grid = grid.permute(1, 2, 0).cpu().numpy() # (H,W,C)
                 grid_bgr = cv2.cvtColor((_grid * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
@@ -557,7 +568,7 @@ class DexHandVisionDREnv(DexHandVisionEnv):
                 cv2.waitKey(1)
             # Write to tensor board
             WRITE_TB = True
-            if WRITE_TB and self.feature_extractor.step_count % 20 == 0:
+            if WRITE_TB and self.feature_extractor.step_count % 200 == 0:
                 self.feature_extractor.tb_writer.add_image("ground-truth-tiled-camera", grid, global_step=self.feature_extractor.step_count)
 
 
@@ -578,15 +589,16 @@ class DexHandVisionDREnv(DexHandVisionEnv):
         DBG_PRED_CAMERA_PROJS = True
         if DBG_PRED_CAMERA_PROJS:
 
-            valid_mask, (u, v, visible) = _project_and_visible(pred_obj_pose.reshape(-1, 9, 3), fx, fy, cx, cy, W, H, convention=self.cfg.tiled_camera.offset.convention)  # (B,)
+            # NOTE: naming variable to avoid overwrite previous variable.
+            pred_valid_mask, (pred_u, pred_v, pred_visible) = _project_and_visible(pred_obj_pose.reshape(-1, 9, 3), fx, fy, cx, cy, W, H, convention=self.cfg.tiled_camera.offset.convention)  # (B,)
             
             # get raw rgb (expect shape (B,H,W,3) or (H,W,3) and dtype uint8 or float in [0,1])
             image_raw = rgb_img_input.clone()
 
-            # get projected coords and visibility (u, v are torch tensors from _project_and_visible)
-            u_np = u.detach().cpu().numpy()
-            v_np = v.detach().cpu().numpy()
-            vis_np = visible.detach().cpu().numpy().astype(bool)
+            # get projected coords and visibility (pred_u, pred_v are torch tensors from _project_and_visible)
+            u_np = pred_u.detach().cpu().numpy()
+            v_np = pred_v.detach().cpu().numpy()
+            vis_np = pred_visible.detach().cpu().numpy().astype(bool)
 
             # convert image to numpy uint8 RGB if needed
             if torch.is_tensor(image_raw):
@@ -610,7 +622,7 @@ class DexHandVisionDREnv(DexHandVisionEnv):
                 # convert to BGR for OpenCV drawing
                 img_bgr = cv2.cvtColor(img_np[i], cv2.COLOR_RGB2BGR).copy()
 
-                # draw each visible keypoint: draw point and cross-hair lines for u and v
+                # draw each visible keypoint: draw point and cross-hair lines for pred_u and v
                 for j in range(u_np.shape[1]):
                     if vis_np[i, j]:
                         x = int(round(u_np[i, j]))
@@ -645,7 +657,7 @@ class DexHandVisionDREnv(DexHandVisionEnv):
                 cv2.waitKey(1)
             WRITE_TB = True
             # NOTE: this is after `step` call, so we need to subtract 1 to get the previous step.
-            if WRITE_TB and (self.feature_extractor.step_count-1) % 20 == 0:
+            if WRITE_TB and (self.feature_extractor.step_count-1) % 200 == 0:
                 self.feature_extractor.tb_writer.add_image("predicted-tiled-camera", grid, global_step=self.feature_extractor.step_count)
                 # NOTE: flush to ensure the image is written to disk, cause it is weird that the image is not written to disk sometimes. Investigate it later.
                 self.feature_extractor.tb_writer.flush()
@@ -679,3 +691,59 @@ class DexHandVisionDREnv(DexHandVisionEnv):
 
         # 7) Return image-based observation for policy
         return rel_quat
+
+
+    def _compute_proprio_observations(self):
+        """Proprioception observations from physics."""
+        # default size of Nuclues server's cube is 0.06m
+        size = (2 * 0.03 * self.cfg.object_scale[0], 2 * 0.03 * self.cfg.object_scale[1], 2 * 0.03 * self.cfg.object_scale[2])
+        # NOTE: use zero-positioned cube's keypoints as goal keypoints.
+        zero_pos_goal_keypoints = self.goal_keypoints.clone()
+        compute_keypoints(pose=torch.cat((torch.zeros_like(self.goal_pos), self.goal_rot), dim=1), size=size, out=zero_pos_goal_keypoints)
+   
+        obs_components = []
+        
+        # Add hand joint velocities if enabled
+        if self.cfg.include_vel_in_obs:
+            obs_components.append(self.cfg.vel_obs_scale * self.hand_dof_vel)
+        
+        # Add remaining components
+        obs_components.extend([
+            # current object position
+            self.object_pos,
+            # fingertip positions and orientations
+            self.fingertip_pos.view(self.num_envs, self.num_fingertips * 3),
+            # NOTE: vanilla OpenAI Rl algorithm dont' include fingertip orientations
+            # self.fingertip_rot.view(self.num_envs, self.num_fingertips * 4),
+        ])
+        
+        # Add fingertip velocities if enabled
+        if self.cfg.include_vel_in_obs:
+            obs_components.append(self.fingertip_velocities.view(self.num_envs, self.num_fingertips * 6))
+        
+        # Add actions
+        obs_components.append(self.actions)
+        
+        obs = torch.cat(obs_components, dim=-1)
+        return obs
+
+    def _compute_states(self):
+        """Asymmetric states for the critic."""
+        sim_states = self.compute_full_state()
+        # NOTE: training is viable without vision-based embeddings, and vision-CNN has no effect on critic training dynamics.
+        return sim_states
+
+    def _get_observations(self) -> dict:
+        # proprioception observations
+        state_obs = self._compute_proprio_observations()
+        # vision observations from CMM
+        image_obs = self._compute_image_observations()
+        obs = torch.cat((state_obs, image_obs), dim=-1)
+        # asymmetric critic states
+        if self.cfg.has_fingertip_contact_forces:
+            self.fingertip_force_sensors = self.hand.root_physx_view.get_link_incoming_joint_force()[:, self.finger_bodies]
+        state = self._compute_states()
+
+        observations = {"policy": obs, "critic": state}
+        return observations
+
