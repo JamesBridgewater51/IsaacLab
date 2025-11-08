@@ -34,13 +34,7 @@ CURRENT_TIME = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
 @configclass
 class DexHandDirectEnvRelQuatCfg(DexHandEnvCfg):
     # scene
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=16, env_spacing=2, replicate_physics=True)
-
-
-@configclass
-class DexHandDirectEnvRelQuatPlayCfg(DexHandDirectEnvRelQuatCfg):
-    # scene
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=64, env_spacing=0.5, replicate_physics=True)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=16, env_spacing=0.5, replicate_physics=True)
 
 def kabsch_R(A, B):  # A,B: [N,3] centered keypoints
     H = A.T @ B                         # [3,3]
@@ -109,6 +103,7 @@ class DexHandDirectEnvRelQuat(InHandManipulationRealEnv):
         rel_quat = keypoints_to_relquat(self.gt_keypoints, self.goal_keypoints, self.object_pos)  # [B,4]
 
         # Add small quaternion noise using quaternion multiplication for robustness
+        # FIXME: remove this noise to test previous scuesuccessfully trained checkpoint.
         noise_scale = 0.01  # radians, adjust as needed
         angle_noise = torch.randn((rel_quat.shape[0],), device=rel_quat.device) * noise_scale
         axis_noise = torch.randn((rel_quat.shape[0], 3), device=rel_quat.device)

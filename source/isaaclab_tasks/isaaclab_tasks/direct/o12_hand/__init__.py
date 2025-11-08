@@ -73,10 +73,10 @@ gym.register(
 
 gym.register(
     id="Isaac-Repose-Cube-O12-Vision-Play-v0",
-    entry_point=f"isaaclab_tasks.direct.inhand_manipulation.dexhand_vision_env:DexHandVisionEnv",
+    entry_point=f"isaaclab_tasks.direct.inhand_manipulation.dexhand_direct_env_rel_quat:DexHandDirectEnvRelQuat",
     disable_env_checker=True,
     kwargs={
-        "env_cfg_entry_point": f"isaaclab_tasks.direct.inhand_manipulation.dexhand_vision_env:DexHandVisionEnvPlayCfg",
+        "env_cfg_entry_point": f"isaaclab_tasks.direct.inhand_manipulation.dexhand_direct_env_rel_quat:DexHandDirectEnvRelQuatCfg",
         "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_vision_cfg.yaml",
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:O12HandVisionPPORunnerCfg",
         "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_vision_cfg.yaml",
