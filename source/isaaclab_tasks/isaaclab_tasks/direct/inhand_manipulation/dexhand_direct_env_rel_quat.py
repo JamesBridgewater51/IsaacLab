@@ -20,11 +20,11 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, RigidObject
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils import configclass
-from isaaclab.utils.math import quat_apply, quat_conjugate, quat_mul
 
 from isaaclab_tasks.direct.inhand_manipulation.inhand_manipulation_env import InHandManipulationEnv, unscale
 from isaaclab_tasks.direct.inhand_manipulation.inhand_manipulation_real_env import InHandManipulationRealEnv
 from isaaclab_tasks.direct.o12_hand.o12_hand_env_cfg import O12HandSim2RealEnvCfg as DexHandEnvCfg
+from .utils import *
 from cprint import cprint
 import datetime
 import os
@@ -36,26 +36,6 @@ class DexHandDirectEnvRelQuatCfg(DexHandEnvCfg):
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=16, env_spacing=0.5, replicate_physics=True)
 
-def kabsch_R(A, B):  # A,B: [N,3] centered keypoints
-    H = A.T @ B                         # [3,3]
-    U, S, Vt = torch.linalg.svd(H)
-    R = U @ torch.diag(torch.tensor([1,1, torch.sign(torch.linalg.det(U @ Vt))], device=A.device)) @ Vt
-    return R
-
-def keypoints_to_relquat(K_obj, K_goal, obj_center):
-    # K_obj: [B,8,3] world; K_goal: [B,8,3] world(=0+R_g*corners); obj_center: [B,3]
-    A = K_obj - obj_center.unsqueeze(1)   # center
-    B = K_goal                             # center at 0
-    R_rel = torch.stack([kabsch_R(A[i], B[i]) for i in range(A.shape[0])], dim=0)  # [B,3,3]
-    # 3x3 -> quat (w,x,y,z)
-    def rotmat_to_quat(R):
-        # 可用自带函数或写稳定版本
-        qw = torch.sqrt(torch.clamp(1.0 + torch.diagonal(R, dim1=1, dim2=2).sum(dim=1), min=1e-6)) / 2
-        qx = (R[:,2,1]-R[:,1,2])/(4*qw); qy = (R[:,0,2]-R[:,2,0])/(4*qw); qz = (R[:,1,0]-R[:,0,1])/(4*qw)
-        return torch.stack([qw,qx,qy,qz], dim=1)
-    q_rel = rotmat_to_quat(R_rel)
-    # 也可输出 6D 表示：R_rel[:,:2].reshape(B,6)
-    return q_rel
 
 class DexHandDirectEnvRelQuat(InHandManipulationRealEnv):
     cfg: DexHandDirectEnvRelQuatCfg
@@ -106,7 +86,7 @@ class DexHandDirectEnvRelQuat(InHandManipulationRealEnv):
         # FIXME: remove this noise to test previous scuesuccessfully trained checkpoint.
         noise_scale = 0.01  # radians, adjust as needed
         angle_noise = torch.randn((rel_quat.shape[0],), device=rel_quat.device) * noise_scale
-        axis_noise = torch.randn((rel_quat.shape[0], 3), device=rel_quat.device)
+        axis_noise = torch.randn((rel_quat.shape[0], 3), device=rel_quat.device) * noise_scale
         axis_noise = axis_noise / (axis_noise.norm(dim=-1, keepdim=True).clamp(min=1e-8))
         half_angle = 0.5 * angle_noise
         sin_half = torch.sin(half_angle)
@@ -119,11 +99,6 @@ class DexHandDirectEnvRelQuat(InHandManipulationRealEnv):
         rel_quat_noisy = rel_quat_noisy / rel_quat_noisy.norm(dim=1, keepdim=True).clamp(min=1e-8)
         rel_quat = rel_quat_noisy
 
-        # 6) Logging
-        if "log" not in self.extras:
-            self.extras["log"] = dict()
-
-        # 7) Return relative quaternion observation for policy
         return rel_quat
 
     def _compute_proprio_observations(self):
@@ -183,34 +158,3 @@ class DexHandDirectEnvRelQuat(InHandManipulationRealEnv):
 
         observations = {"policy": obs, "critic": state}
         return observations
-
-
-@torch.jit.script
-def compute_keypoints(
-    pose: torch.Tensor,
-    num_keypoints: int = 8,
-    size: tuple[float, float, float] = (2 * 0.03, 2 * 0.03, 2 * 0.03),
-    out: torch.Tensor | None = None,
-):
-    """Computes positions of 8 corner keypoints of a cube.
-
-    Args:
-        pose: Position and orientation of the center of the cube. Shape is (N, 7)
-        num_keypoints: Number of keypoints to compute. Default = 8
-        size: Length of X, Y, Z dimensions of cube. Default = [0.06, 0.06, 0.06]
-        out: Buffer to store keypoints. If None, a new buffer will be created.
-    """
-    num_envs = pose.shape[0]
-    if out is None:
-        out = torch.ones(num_envs, num_keypoints, 3, dtype=torch.float32, device=pose.device)
-    else:
-        out[:] = 1.0
-    for i in range(num_keypoints):
-        # which dimensions to negate
-        n = [((i >> k) & 1) == 0 for k in range(3)]
-        corner_loc = ([(1 if n[k] else -1) * s / 2 for k, s in enumerate(size)],)
-        corner = torch.tensor(corner_loc, dtype=torch.float32, device=pose.device) * out[:, i, :]
-        # express corner position in the world frame
-        out[:, i, :] = pose[:, :3] + quat_apply(pose[:, 3:7], corner)
-
-    return out

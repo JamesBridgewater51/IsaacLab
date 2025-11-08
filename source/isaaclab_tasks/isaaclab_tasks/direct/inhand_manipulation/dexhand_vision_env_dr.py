@@ -15,12 +15,10 @@ from isaaclab.managers.manager_term_cfg import EventTermCfg
 import isaaclab.sim as sim_utils
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
-# add alongside your other imports at the top of domain_randomized_dexhand_vision_env.py
 import isaaclab.envs.mdp as mdp
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils.assets import NVIDIA_NUCLEUS_DIR
-from .dexhand_vision_env import _project_and_visible, _cam_to_world, compute_keypoints, world_to_cam_batch, keypoints_to_relquat, cam_to_world_batch
-from .dexhand_vision_env import _compute_intrinsics, _world_to_cam
+from .utils import compute_keypoints, keypoints_to_relquat, _project_and_visible, _cam_to_world, world_to_cam_batch, cam_to_world_batch, _compute_intrinsics, _world_to_cam
 from .dexhand_vision_env import DexHandEnvCfg, DexHandVisionEnv, DexHandVisionEnvCfg
 import numpy as np
 import cv2
