@@ -116,7 +116,7 @@ class O12HandOpenAIEnvCfg(DirectRLEnvCfg):
         goal_visual_material = None
         contact_debug_vis = True
         # contact_debug_vis = False
-        episode_length_s = 0.2
+        episode_length_s = 20.0
 
     elif object_name in ["ring", "vase", "cup", "A", "pyramid", "apple", "stick", "smallvase"]:
         # usd_path = f"assets/mjcf/pen_only/DAPG_pen_only.usd"
@@ -132,9 +132,7 @@ class O12HandOpenAIEnvCfg(DirectRLEnvCfg):
             visual_material = None
             goal_visual_material = None
         contact_debug_vis = False
-        episode_length_s = 0.4
-        # episode_length_s = 1.0
-        # episode_length_s = 8.0
+        episode_length_s = 20.0
 
     else:
         object_scale = OBJ_ATTR_DICT[object_name]["scale"]
@@ -149,7 +147,7 @@ class O12HandOpenAIEnvCfg(DirectRLEnvCfg):
             visual_material = None
             goal_visual_material = None
         contact_debug_vis = False
-        episode_length_s = 2.0
+        episode_length_s = 20.0
         if use_heavy:
             usd_path = os.path.join(root_dir, f"assets/shape_variant/usd_heavy/{object_name}/model.usd")
             usd_instanceable_path = os.path.join(root_dir, f"assets/shape_variant/usd_heavy/{object_name}/model_instanceable.usd")
