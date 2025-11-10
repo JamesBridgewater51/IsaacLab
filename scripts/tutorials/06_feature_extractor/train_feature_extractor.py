@@ -32,8 +32,8 @@ def main():
     # cfg = DexHandVisionEnvCfg()
     # cfg.scene.num_envs = 1536  # 
     cfg.scene.num_envs = 16  # 
-    cfg.tiled_camera.width = 320
-    cfg.tiled_camera.height = 240
+    cfg._camera.width = 320
+    cfg._camera.height = 240
     cfg.feature_extractor.train = True
     cfg.feature_extractor.load_checkpoint = False
     cfg.feature_extractor.checkpoint_path = ""

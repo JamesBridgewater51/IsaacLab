@@ -33,7 +33,7 @@ class O12HandOpenAIEnvCfg(DirectRLEnvCfg):
 
     # -- Environment settings
     decimation = 4
-    episode_length_s = 10.0
+    episode_length_s = 20.0
     dof_hand = 12
     num_fingertips = 5
     action_space = dof_hand

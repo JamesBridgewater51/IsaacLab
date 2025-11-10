@@ -48,12 +48,10 @@ class DexHandVisionEnvCfg(DexHandEnvCfg):
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=16, env_spacing=2, replicate_physics=True)
 
     # camera
-    tiled_camera: TiledCameraCfg = TiledCameraCfg(
-    # tiled_camera: CameraCfg = CameraCfg(
+    _camera: TiledCameraCfg = TiledCameraCfg(
         prim_path="/World/envs/env_.*/Camera",
         # NOTE: 'convention' specifies camera frame convention, so 'pos' is unaffected by convention, 'rot' is affected.
         # NOTE: camera is positioned to look down upon hand-object system.
-        # offset=CameraCfg.OffsetCfg(pos=(0, -0.1, 0.85), rot=(0.7071, 0.0, 0.7071, 0.0), convention="world"), # for o12 hand.
         offset=TiledCameraCfg.OffsetCfg(pos=(0, -0.1, 0.85), rot=(0.7071, 0.0, 0.7071, 0.0), convention="world"), # for o12 hand.
         data_types=["rgb"],
         spawn=sim_utils.PinholeCameraCfg(
@@ -89,8 +87,7 @@ class DexHandVisionEnv(InHandManipulationRealEnv):
         # add hand, in-hand object, and goal object
         self.hand = Articulation(self.cfg.robot_cfg)
         self.object = RigidObject(self.cfg.object_cfg)
-        # self._tiled_camera = Camera(self.cfg.tiled_camera)
-        self._tiled_camera = TiledCamera(self.cfg.tiled_camera)
+        self._camera = Camera(self.cfg._camera)
         # get stage
         stage = omni.usd.get_context().get_stage()
         # add semantics for in-hand cube
@@ -105,7 +102,7 @@ class DexHandVisionEnv(InHandManipulationRealEnv):
         # add articulation to scene - we must register to scene to randomize with EventManager
         self.scene.articulations["robot"] = self.hand
         self.scene.rigid_objects["object"] = self.object
-        self.scene.sensors["tiled_camera"] = self._tiled_camera
+        self.scene.sensors["camera"] = self._camera
         # add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
@@ -129,8 +126,8 @@ class DexHandVisionEnv(InHandManipulationRealEnv):
             cam_properties = [cam_randomizer.get_camera_properties(cam_prim) for cam_prim in camera_prims]
 
             # Image size (we still use configured tile size unless you randomize resolution per-camera)
-            W = int(self.cfg.tiled_camera.width)
-            H = int(self.cfg.tiled_camera.height)
+            W = int(self.cfg._camera.width)
+            H = int(self.cfg._camera.height)
 
             # Pre-allocate per-env tensors
             device = self.device
@@ -140,8 +137,8 @@ class DexHandVisionEnv(InHandManipulationRealEnv):
             cam_off_pos = torch.zeros((B, 3), dtype=torch.float32, device=device)
             # cam_eulers = torch.zeros((B, 3), dtype=torch.float32, device=device)  # degrees
             cam_quat = torch.zeros((B,4), dtype=torch.float32, device=device)
-            focal_lengths = torch.full((B,), float(self.cfg.tiled_camera.spawn.focal_length), dtype=torch.float32, device=device)
-            apertures = torch.full((B,), float(self.cfg.tiled_camera.spawn.horizontal_aperture), dtype=torch.float32, device=device)
+            focal_lengths = torch.full((B,), float(self.cfg._camera.spawn.focal_length), dtype=torch.float32, device=device)
+            apertures = torch.full((B,), float(self.cfg._camera.spawn.horizontal_aperture), dtype=torch.float32, device=device)
 
             # populate from properties dict (fall back to cfg values if key missing)
             for i, props in enumerate(cam_properties):
@@ -177,7 +174,7 @@ class DexHandVisionEnv(InHandManipulationRealEnv):
             points_cam = world_to_cam_batch(points_world, cam_off_pos, cam_quat)  # (B,K,3)
 
             # 7) Project and test visibility
-            # NOTE: convention is "opengl" instead of self.cfg.tiled_camera.offset.convention, since camera rnaomizer calls external isaaclab API
+            # NOTE: convention is "opengl" instead of self.cfg._camera.offset.convention, since camera rnaomizer calls external isaaclab API
             valid_mask, (u, v, visible) = _project_and_visible(points_cam, fx, fy, cx, cy, W, H, convention="opengl")  # (B,)
 
             # convert valid_mask into same device/dtype as other tensors
@@ -186,16 +183,16 @@ class DexHandVisionEnv(InHandManipulationRealEnv):
         else:
             # 3) Compute per-env visibility mask from camera frustum (>= 2 corners visible)
             # 3.1) Camera intrinsics from cfg
-            W = int(self.cfg.tiled_camera.width)
-            H = int(self.cfg.tiled_camera.height)
-            f_mm = float(self.cfg.tiled_camera.spawn.focal_length)
-            apr_w_mm = float(self.cfg.tiled_camera.spawn.horizontal_aperture)
+            W = int(self.cfg._camera.width)
+            H = int(self.cfg._camera.height)
+            f_mm = float(self.cfg._camera.spawn.focal_length)
+            apr_w_mm = float(self.cfg._camera.spawn.horizontal_aperture)
             fx, fy, cx, cy = _compute_intrinsics(f_mm, apr_w_mm, W, H)
 
             # 3.2) Camera pose (world) from env origins 
             env_origins = self.scene.env_origins  # (B,3)
-            cam_off_pos = torch.tensor(self.cfg.tiled_camera.offset.pos, dtype=torch.float32, device=self.device)  # (3,)
-            cam_quat = torch.tensor(self.cfg.tiled_camera.offset.rot, dtype=torch.float32, device=self.device)  # (4,) (wxyz)
+            cam_off_pos = torch.tensor(self.cfg._camera.offset.pos, dtype=torch.float32, device=self.device)  # (3,)
+            cam_quat = torch.tensor(self.cfg._camera.offset.rot, dtype=torch.float32, device=self.device)  # (4,) (wxyz)
             cam_quat = cam_quat.expand(self.num_envs, -1)     # (B,4)
 
             # 3.3) Transform GT keypoints from world to camera coords
@@ -204,7 +201,7 @@ class DexHandVisionEnv(InHandManipulationRealEnv):
             points_cam = _world_to_cam(points_world, cam_off_pos, cam_quat)  # (B,8,3)
 
             # 3.4) Project and test visibility
-            valid_mask, (u, v, visible) = _project_and_visible(points_cam, fx, fy, cx, cy, W, H, convention=self.cfg.tiled_camera.offset.convention)  # (B,)
+            valid_mask, (u, v, visible) = _project_and_visible(points_cam, fx, fy, cx, cy, W, H, convention=self.cfg._camera.offset.convention)  # (B,)
 
 
         # NOTE: calling `sim.render()` here to ensure camera images are updated. it is necessary.
@@ -229,7 +226,7 @@ class DexHandVisionEnv(InHandManipulationRealEnv):
         object_pose = object_pose.reshape(-1, 27)  # (B,27)
         # --------------------------------------------------------
         # [STEP 1] Grab the RGB image (batched, expected shape (B, H, W, 3), dtype float or uint8)
-        rgb_img = self._tiled_camera.data.output["rgb"]
+        rgb_img = self._camera.data.output["rgb"]
         # Ensure torch.Tensor and on correct device
         if not torch.is_tensor(rgb_img):
             rgb_img = torch.from_numpy(rgb_img)
@@ -386,7 +383,7 @@ class DexHandVisionEnv(InHandManipulationRealEnv):
             gt_uv=torch.stack([u, v], dim=-1),
             mask=valid_mask,
             model_kwargs=model_kwargs,
-            camera_convention=self.cfg.tiled_camera.offset.convention,
+            camera_convention=self.cfg._camera.offset.convention,
         )
 
         # DEBUG: visualize model predictions
@@ -395,7 +392,7 @@ class DexHandVisionEnv(InHandManipulationRealEnv):
         if DBG_PRED_CAMERA_PROJS:
 
             # NOTE: naming variable to avoid overwrite previous variable.
-            pred_valid_mask, (pred_u, pred_v, pred_visible) = _project_and_visible(pred_obj_pose.reshape(-1, 9, 3), fx, fy, cx, cy, W, H, convention=self.cfg.tiled_camera.offset.convention)  # (B,)
+            pred_valid_mask, (pred_u, pred_v, pred_visible) = _project_and_visible(pred_obj_pose.reshape(-1, 9, 3), fx, fy, cx, cy, W, H, convention=self.cfg._camera.offset.convention)  # (B,)
             
             # get raw rgb (expect shape (B,H,W,3) or (H,W,3) and dtype uint8 or float in [0,1])
             image_raw = rgb_img_input.clone()

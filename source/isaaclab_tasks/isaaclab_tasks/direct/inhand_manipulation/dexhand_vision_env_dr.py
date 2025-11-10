@@ -20,6 +20,7 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils.assets import NVIDIA_NUCLEUS_DIR
 from .utils import compute_keypoints, keypoints_to_relquat, _project_and_visible, _cam_to_world, world_to_cam_batch, cam_to_world_batch, _compute_intrinsics, _world_to_cam
 from .dexhand_vision_env import DexHandEnvCfg, DexHandVisionEnv, DexHandVisionEnvCfg
+from isaaclab.sensors import  CameraCfg, Camera
 import numpy as np
 import cv2
 import torchvision
@@ -124,10 +125,14 @@ class DRCfg:
         ),
     }
 
+
 @configclass
 class DexHandVisionDREnvCfg(DexHandVisionEnvCfg):
     """Base vision env cfg + DR knobs."""
     dr: DRCfg = DRCfg()
+
+    # NOTE: overwirte episode_length_s to 0.2 for quick env reset for fast FeatureExtractor training.
+    episode_length_s = 0.1
 
     # a kinematic table per env; note: CuboidCfg does NOT take prim_path
     table_cfg: sim_utils.CuboidCfg = sim_utils.CuboidCfg(
@@ -141,6 +146,19 @@ class DexHandVisionDREnvCfg(DexHandVisionEnvCfg):
     distractor_root_expr: str = "/World/envs/env_.*/distractors"
     light_root_expr: str = "/World/envs/env_.*/DRLights"
 
+    # NOTE: overwrite camera here since TiledCamera would introduce inaccurate / inconsistent captured images.
+    _camera: CameraCfg = CameraCfg(
+        prim_path="/World/envs/env_.*/Camera",
+        # NOTE: 'convention' specifies camera frame convention, so 'pos' is unaffected by convention, 'rot' is affected.
+        # NOTE: camera is positioned to look down upon hand-object system.
+        offset=CameraCfg.OffsetCfg(pos=(0, -0.1, 0.85), rot=(0.7071, 0.0, 0.7071, 0.0), convention="world"), # for o12 hand.
+        data_types=["rgb"],
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=24.0, focus_distance=400.0, horizontal_aperture=25.09803921568627451, clipping_range=(0.1, 20.0)
+        ),
+        width=320,
+        height=240,
+    )
 
 # ---------------------------------------------------------------------
 # Env
@@ -322,8 +340,8 @@ class DexHandVisionDREnv(DexHandVisionEnv):
             cam_properties = [cam_randomizer.get_camera_properties(cam_prim) for cam_prim in camera_prims]
 
             # Image size (we still use configured tile size unless you randomize resolution per-camera)
-            W = int(self.cfg.tiled_camera.width)
-            H = int(self.cfg.tiled_camera.height)
+            W = int(self.cfg._camera.width)
+            H = int(self.cfg._camera.height)
 
             # Pre-allocate per-env tensors
             device = self.device
@@ -333,8 +351,8 @@ class DexHandVisionDREnv(DexHandVisionEnv):
             cam_off_pos = torch.zeros((B, 3), dtype=torch.float32, device=device)
             # cam_eulers = torch.zeros((B, 3), dtype=torch.float32, device=device)  # degrees
             cam_quat = torch.zeros((B,4), dtype=torch.float32, device=device)
-            focal_lengths = torch.full((B,), float(self.cfg.tiled_camera.spawn.focal_length), dtype=torch.float32, device=device)
-            apertures = torch.full((B,), float(self.cfg.tiled_camera.spawn.horizontal_aperture), dtype=torch.float32, device=device)
+            focal_lengths = torch.full((B,), float(self.cfg._camera.spawn.focal_length), dtype=torch.float32, device=device)
+            apertures = torch.full((B,), float(self.cfg._camera.spawn.horizontal_aperture), dtype=torch.float32, device=device)
 
             # populate from properties dict (fall back to cfg values if key missing)
             for i, props in enumerate(cam_properties):
@@ -370,7 +388,7 @@ class DexHandVisionDREnv(DexHandVisionEnv):
             points_cam = world_to_cam_batch(points_world, cam_off_pos, cam_quat)  # (B,K,3)
 
             # 7) Project and test visibility
-            # NOTE: convention is "opengl" instead of self.cfg.tiled_camera.offset.convention, since camera rnaomizer calls external isaaclab API
+            # NOTE: convention is "opengl" instead of self.cfg._camera.offset.convention, since camera rnaomizer calls external isaaclab API
             valid_mask, (u, v, visible) = _project_and_visible(points_cam, fx, fy, cx, cy, W, H, convention="opengl")  # (B,)
 
             # convert valid_mask into same device/dtype as other tensors
@@ -379,16 +397,16 @@ class DexHandVisionDREnv(DexHandVisionEnv):
         else:
             # 3) Compute per-env visibility mask from camera frustum (>= 2 corners visible)
             # 3.1) Camera intrinsics from cfg
-            W = int(self.cfg.tiled_camera.width)
-            H = int(self.cfg.tiled_camera.height)
-            f_mm = float(self.cfg.tiled_camera.spawn.focal_length)
-            apr_w_mm = float(self.cfg.tiled_camera.spawn.horizontal_aperture)
+            W = int(self.cfg._camera.width)
+            H = int(self.cfg._camera.height)
+            f_mm = float(self.cfg._camera.spawn.focal_length)
+            apr_w_mm = float(self.cfg._camera.spawn.horizontal_aperture)
             fx, fy, cx, cy = _compute_intrinsics(f_mm, apr_w_mm, W, H)
 
             # 3.2) Camera pose (world) from env origins 
             env_origins = self.scene.env_origins  # (B,3)
-            cam_off_pos = torch.tensor(self.cfg.tiled_camera.offset.pos, dtype=torch.float32, device=self.device)  # (3,)
-            cam_quat = torch.tensor(self.cfg.tiled_camera.offset.rot, dtype=torch.float32, device=self.device)  # (4,) (wxyz)
+            cam_off_pos = torch.tensor(self.cfg._camera.offset.pos, dtype=torch.float32, device=self.device)  # (3,)
+            cam_quat = torch.tensor(self.cfg._camera.offset.rot, dtype=torch.float32, device=self.device)  # (4,) (wxyz)
             cam_quat = cam_quat.expand(self.num_envs, -1)     # (B,4)
 
             # 3.3) Transform GT keypoints from world to camera coords
@@ -397,11 +415,10 @@ class DexHandVisionDREnv(DexHandVisionEnv):
             points_cam = _world_to_cam(points_world, cam_off_pos, cam_quat)  # (B,8,3)
 
             # 3.4) Project and test visibility
-            valid_mask, (u, v, visible) = _project_and_visible(points_cam, fx, fy, cx, cy, W, H, convention=self.cfg.tiled_camera.offset.convention)  # (B,)
+            valid_mask, (u, v, visible) = _project_and_visible(points_cam, fx, fy, cx, cy, W, H, convention=self.cfg._camera.offset.convention)  # (B,)
 
 
         # NOTE: calling `sim.render()` here to ensure camera images are updated. it is necessary.
-        # Reduced from 20 to 1-2 renders for speed (20 was excessive)
         self.sim.render()
 
         # # 4) Train CNN with visibility mask
@@ -422,7 +439,7 @@ class DexHandVisionDREnv(DexHandVisionEnv):
         object_pose = object_pose.reshape(-1, 27)  # (B,27)
         # --------------------------------------------------------
         # [STEP 1] Grab the RGB image (batched, expected shape (B, H, W, 3), dtype float or uint8)
-        rgb_img = self._tiled_camera.data.output["rgb"]
+        rgb_img = self._camera.data.output["rgb"]
         # Ensure torch.Tensor and on correct device
         if not torch.is_tensor(rgb_img):
             rgb_img = torch.from_numpy(rgb_img)
@@ -436,58 +453,79 @@ class DexHandVisionDREnv(DexHandVisionEnv):
         # Clamp to [0,1]
         rgb_img = rgb_img.clamp(0, 1)
 
-        USE_DATA_AUG = False
+        USE_DATA_AUG = True
         if USE_DATA_AUG:
             # --------------------------------------------------------
-            # [STEP 2] Compose augmentations using kornia.enhance and safe Kornia augmentations
-            # Avoid color or contrast changes as cube color fidelity is crucial.
-            # Only spatially safe and appearance-safe pixel noise/blur allowed.
-
+            # [STEP 2] Two-layer augmentation pipeline:
+            # Layer 1: Enhancement adjustments (1-2 from brightness/contrast/gamma/log/saturation/sharpness)
+            # Layer 2: Spatial and noise augmentations (blur, motion blur, noise, plasma shadow)
+            # Note: Isaac Lab images have medium-to-high brightness and high contrast,
+            # so we tend to decrease brightness and contrast.
 
             B, H, W, C = rgb_img.shape
             img_chw = rgb_img.permute(0, 3, 1, 2).contiguous()  # (B,3,H,W)
 
-            # Define safe augmentations:
-            safe_augs = [
+            # --------------------------------------------------------
+            # LAYER 1: Enhancement adjustments (choose 1-2, apply sequentially)
+            # --------------------------------------------------------
+            # NOTE:
+            enhancement_options = [
+                "brightness",
+                "contrast", 
+                "gamma",
+                "log",
+                "saturation",
+                "sharpness"
+            ]
+            
+            chosen_enhancements = random.sample(enhancement_options, k=1)
+            
+            img_aug = img_chw.clone()
+            
+            for enh_type in chosen_enhancements:
+                if enh_type == "brightness":
+                    brightness_factor = torch.empty(B).uniform_(-0.4, 0.35).to(img_aug.device)
+                    img_aug = Kenh.adjust_brightness(img_aug, brightness_factor, clip_output=True)
+                    
+                elif enh_type == "contrast":
+                    contrast_factor = torch.empty(B).uniform_(0.3, 0.9).to(img_aug.device)
+                    img_aug = Kenh.adjust_contrast(img_aug, contrast_factor)
+                    
+                elif enh_type == "gamma":
+                    gamma = torch.empty(B).uniform_(1.1, 5.0).to(img_aug.device)
+                    gain = torch.empty(B).uniform_(0.9, 1.0).to(img_aug.device)  # Optional gain variation
+                    img_aug = Kenh.adjust_gamma(img_aug, gamma, gain)
+                    
+                elif enh_type == "log":
+                    log_gain = torch.empty(B).uniform_(0.5, 1.0).to(img_aug.device)
+                    log_gain_expand = log_gain.view(B, 1, 1, 1)  # (B,1,1,1)
+                    img_aug = torch.log1p(log_gain_expand * img_aug) / torch.log1p(log_gain_expand)
+                    
+                elif enh_type == "saturation":
+                    saturation_factor = torch.empty(B).uniform_(0.20, 4.0).to(img_aug.device)
+                    img_aug = Kenh.adjust_saturation(img_aug, saturation_factor)
+                    
+                elif enh_type == "sharpness":
+                    sharpness_factor = torch.empty(B).uniform_(0.15, 0.85).to(img_aug.device)
+                    img_aug = Kenh.sharpness(img_aug, sharpness_factor)
+                
+                # Clamp after each enhancement to prevent overflow
+                img_aug = img_aug.clamp(0, 1)
+
+            # --------------------------------------------------------
+            # LAYER 2: Spatial and noise augmentations
+            # --------------------------------------------------------
+            # Define spatial/noise augmentations (always apply all 4)
+            spatial_augs = [
                 K_aug.RandomGaussianBlur((3, 5), (0.2, 1.2), p=0.7),
                 K_aug.RandomMotionBlur(kernel_size=9, angle=30., direction=1.0, p=0.5),
                 K_aug.RandomGaussianNoise(mean=0.0, std=0.07, p=0.7),
                 K_aug.RandomPlasmaShadow(roughness=(0.12, 0.4), shade_intensity=(-0.2, 0.0), shade_quantity=(0.0, 0.5), p=0.12),
             ]
-
-            # Randomly sample at most three augmentations from the pool
-            num_augs = min(3, len(safe_augs))
-            chosen_augs = random.sample(safe_augs, k=num_augs)
-            aug_transforms = torch.nn.Sequential(*chosen_augs)
-            img_aug = aug_transforms(img_chw)
-
-            # Randomly apply some pixel-level intensity/structural augmentation with kornia.enhance
-
-                # 2. Subtle per-batch gamma perturbation
-            if torch.rand(1).item() < 0.25:
-                gamma = float(torch.empty(1).uniform_(0.90, 1.10))
-                img_aug = Kenh.adjust_gamma(img_aug, gamma)
-                img_aug = img_aug.clamp(0, 1)
-
-            # 3. Random mild sharpness (for some batch elements)
-            if torch.rand(1).item() < 0.20:
-                batch_indices = torch.randperm(B)[:max(1, B // 2)]
-                for bi in batch_indices:
-                    # Use kornia.enhance.sharpness (factor~1.1-1.3 for subtle increase)
-                    factor = float(torch.empty(1).uniform_(1.08, 1.25))
-                    img_aug[bi:bi + 1] = Kenh.sharpness(img_aug[bi:bi + 1], factor)
-
-            # 4. Random (safe) brightness jitter (additive, small)
-            if torch.rand(1).item() < 0.20:
-                factor = float(torch.empty(1).uniform_(0.01, 0.07))
-                sign = 1.0 if torch.rand(1).item() < 0.5 else -1.0
-                img_aug = Kenh.adjust_brightness(img_aug, sign * factor)
-                img_aug = img_aug.clamp(0, 1)
-
-            # 5. Optional random spatial channel shuffle (rare, safe)
-            if torch.rand(1).item() < 0.10:
-                perm = torch.randperm(3)
-                img_aug = img_aug[:, perm, :, :]
+            
+            # Apply all spatial augmentations sequentially
+            aug_transforms = torch.nn.Sequential(*spatial_augs)
+            img_aug = aug_transforms(img_aug)
 
             # Remove NaNs/infs, clamp
             img_aug = torch.nan_to_num(img_aug, nan=0.0, posinf=1.0, neginf=0.0)
@@ -579,7 +617,7 @@ class DexHandVisionDREnv(DexHandVisionEnv):
             gt_uv=torch.stack([u, v], dim=-1),
             mask=valid_mask,
             model_kwargs=model_kwargs,
-            camera_convention=self.cfg.tiled_camera.offset.convention,
+            camera_convention=self.cfg._camera.offset.convention,
         )
 
         # DEBUG: visualize model predictions
@@ -588,7 +626,7 @@ class DexHandVisionDREnv(DexHandVisionEnv):
         if DBG_PRED_CAMERA_PROJS:
 
             # NOTE: naming variable to avoid overwrite previous variable.
-            pred_valid_mask, (pred_u, pred_v, pred_visible) = _project_and_visible(pred_obj_pose.reshape(-1, 9, 3), fx, fy, cx, cy, W, H, convention=self.cfg.tiled_camera.offset.convention)  # (B,)
+            pred_valid_mask, (pred_u, pred_v, pred_visible) = _project_and_visible(pred_obj_pose.reshape(-1, 9, 3), fx, fy, cx, cy, W, H, convention=self.cfg._camera.offset.convention)  # (B,)
             
             # get raw rgb (expect shape (B,H,W,3) or (H,W,3) and dtype uint8 or float in [0,1])
             image_raw = rgb_img_input.clone()
@@ -644,7 +682,7 @@ class DexHandVisionDREnv(DexHandVisionEnv):
             tensor = torch.from_numpy(image).permute(0, 3, 1, 2)  # (B,C,H,W)
             cols = int(math.ceil(math.sqrt(n_imgs)))
             grid = torchvision.utils.make_grid(tensor, nrow=cols, padding=2)
-            VIS_IMG_ONLINE = True
+            VIS_IMG_ONLINE = False
             # NOTE: this is after `step` call, so we need to subtract 1 to get the previous step.
             if VIS_IMG_ONLINE:
                 _grid = grid.permute(1, 2, 0).cpu().numpy()
