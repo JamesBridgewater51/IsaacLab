@@ -46,7 +46,7 @@ class O12HandOpenAIEnvCfg(DirectRLEnvCfg):
     # -- Simulation settings
     sim: SimulationCfg = SimulationCfg(
         dt=1 / 120,
-        render_interval=1,
+        render_interval=4,
         physics_material=RigidBodyMaterialCfg(static_friction=1.0, dynamic_friction=1.0),
         physx=PhysxCfg(bounce_threshold_velocity=0.2),
     )

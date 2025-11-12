@@ -13,15 +13,19 @@ import math
 def kabsch_R(A, B):  # A,B: [B,N,3] centered keypoints
     # B: batch dimension
     H = torch.matmul(A.transpose(1, 2), B)  # [B, 3, 3]
-    U, S, Vt = torch.linalg.svd(H)
-    
-    # Create a diagonal matrix with determinant sign
+    U, _, Vt = torch.linalg.svd(H)
+
+    V = Vt.transpose(1, 2)
+    U_t = U.transpose(1, 2)
+
     batch_dim = A.shape[0]
-    diag = torch.ones((batch_dim, 3, 3), device=A.device)
-    diag[:, 2, 2] = torch.sign(torch.linalg.det(torch.matmul(U, Vt)))
-    
-    # Compute rotation matrices
-    R = torch.matmul(torch.matmul(U, diag), Vt)
+    diag = torch.eye(3, device=A.device, dtype=A.dtype).unsqueeze(0).expand(batch_dim, -1, -1).clone()
+    det = torch.linalg.det(torch.matmul(V, U_t))
+    sign_det = torch.sign(det)
+    sign_det[sign_det == 0] = 1.0
+    diag[:, 2, 2] = sign_det
+
+    R = torch.matmul(V, torch.matmul(diag, U_t))
     return R
 
 #  reference: https://github.com/facebookresearch/pytorch3d/blob/2d4d345b6fd2720580bff5f63dcbd3b230b43996/pytorch3d/transforms/rotation_conversions.py#L375
@@ -117,6 +121,37 @@ def matrix_to_quaternion(matrix: torch.Tensor) -> torch.Tensor:
     gather_indices = indices.unsqueeze(-1).expand(expand_dims)
     out = torch.gather(quat_candidates, -2, gather_indices).squeeze(-2)
     return standardize_quaternion(out)
+
+def quaternion_to_matrix(quaternions: torch.Tensor) -> torch.Tensor:
+    """
+    Convert rotations given as quaternions to rotation matrices.
+
+    Args:
+        quaternions: quaternions with real part first,
+            as tensor of shape (..., 4).
+
+    Returns:
+        Rotation matrices as tensor of shape (..., 3, 3).
+    """
+    r, i, j, k = torch.unbind(quaternions, -1)
+    # pyre-fixme[58]: `/` is not supported for operand types `float` and `Tensor`.
+    two_s = 2.0 / (quaternions * quaternions).sum(-1)
+
+    o = torch.stack(
+        (
+            1 - two_s * (j * j + k * k),
+            two_s * (i * j - k * r),
+            two_s * (i * k + j * r),
+            two_s * (i * j + k * r),
+            1 - two_s * (i * i + k * k),
+            two_s * (j * k - i * r),
+            two_s * (i * k - j * r),
+            two_s * (j * k + i * r),
+            1 - two_s * (i * i + j * j),
+        ),
+        -1,
+    )
+    return o.reshape(quaternions.shape[:-1] + (3, 3))
 
 
 
@@ -313,12 +348,23 @@ def cam_to_world_batch(points_cam, cam_positions, cam_quats_wxyz):
     points_world = rotated + cam_positions.unsqueeze(1)  # (B,K,3)
     return points_world
 
-def keypoints_to_relquat(K_obj, K_goal, obj_center):
-    # K_obj: [B,8,3] world; K_goal: [B,8,3] world(=0+R_g*corners); obj_center: [B,3]
-    A = K_obj - obj_center.unsqueeze(1)   # center
-    B = K_goal                             # center at 0
-    R_rel = kabsch_R(A, B)  # [B,3,3] - now batched!
+def keypoints_to_relquat(K_obj, K_goal):
+    # K_obj: [B,8,3] world, not centered
+    # K_goal: [B,8,3] world, not centered
+    # object_rot: [B,4] quaternion (w, x, y, z) representing object orientation in world (object->world)
+    # goal_rot: [B,4] quaternion (w, x, y, z) representing goal orientation in world (goal->world)
+
+    # Center each by their own mean
+    center_obj = K_obj.mean(dim=1, keepdim=True)  # [B,1,3]
+    center_goal = K_goal.mean(dim=1, keepdim=True)  # [B,1,3]
+    A = K_obj - center_obj  # [B,8,3] centered object keypoints
+    B = K_goal - center_goal  # [B,8,3] centered goal keypoints
+
+    # Compute rotation that aligns goal keypoints to object keypoints
+    R_rel = kabsch_R(B, A)  # [B,3,3]
+
     q_rel = matrix_to_quaternion(R_rel)
+    q_rel = standardize_quaternion(q_rel)
     return q_rel
 
 @torch.jit.script

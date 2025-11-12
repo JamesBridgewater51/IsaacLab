@@ -83,10 +83,26 @@ class DexHandDirectEnvRelQuat(InHandManipulationRealEnv):
         
         # 5) Goal keypoints and relative quaternion target
         compute_keypoints(
-            pose=torch.cat((torch.zeros_like(self.goal_pos), self.goal_rot), dim=1), size=size, out=self.goal_keypoints
+            pose=torch.cat((self.goal_pos, self.goal_rot), dim=1), size=size, out=self.goal_keypoints
         )
         # Ground-truth rel_quat
-        rel_quat = keypoints_to_relquat(self.gt_keypoints, self.goal_keypoints, self.object_pos)  # [B,4]
+        rel_quat = keypoints_to_relquat(self.gt_keypoints, self.goal_keypoints)  # [B,4]
+
+        # GT relative quat: computed from object_rot and goal_rot
+        # Compute the relative quaternion between object_rot and goal_rot using quaternion multiplication rules.
+        # The relative quaternion q_rel satisfies: object_rot = q_rel * goal_rot  =>  q_rel = object_rot * conjugate(goal_rot)
+        # (Assuming both are in w,x,y,z order.)
+        object_rot = self.object_rot           # shape: (B,4)
+        goal_rot = self.goal_rot               # shape: (B,4)
+        rel_quat_gt = quat_mul(object_rot, quat_conjugate(goal_rot))   # shape: (B,4)
+        rel_quat_gt = standardize_quaternion(rel_quat_gt)
+
+        # Compare with rel_quat computed above (should be the same if rel_quat computation is correct)
+        diff = torch.norm(rel_quat - rel_quat_gt, p=2, dim=1)  # norm per batch
+        if torch.any(diff > 1e-3):
+            breakpoint()
+            print("Warning: rel_quat and rel_quat_gt disagree! Max diff: ", diff.max().item())
+
 
         # Add small quaternion noise using quaternion multiplication for robustness
         # FIXME: remove this noise to test previous scuesuccessfully trained checkpoint.
@@ -105,16 +121,12 @@ class DexHandDirectEnvRelQuat(InHandManipulationRealEnv):
         rel_quat_noisy = rel_quat_noisy / rel_quat_noisy.norm(dim=1, keepdim=True).clamp(min=1e-8)
         rel_quat = rel_quat_noisy
 
+
         return rel_quat
 
     def _compute_proprio_observations(self):
         """Proprioception observations from physics."""
-        # default size of Nuclues server's cube is 0.06m
-        size = (2 * 0.03 * self.cfg.object_scale[0], 2 * 0.03 * self.cfg.object_scale[1], 2 * 0.03 * self.cfg.object_scale[2])
-        # NOTE: use zero-positioned cube's keypoints as goal keypoints.
-        zero_pos_goal_keypoints = self.goal_keypoints.clone()
-        compute_keypoints(pose=torch.cat((torch.zeros_like(self.goal_pos), self.goal_rot), dim=1), size=size, out=zero_pos_goal_keypoints)
-   
+
         obs_components = []
         
         # Add hand joint velocities if enabled

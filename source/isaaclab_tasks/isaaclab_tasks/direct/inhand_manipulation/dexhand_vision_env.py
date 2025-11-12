@@ -480,7 +480,7 @@ class DexHandVisionEnv(InHandManipulationRealEnv):
         # Ground-truth rel_quat
         # rel_quat = keypoints_to_relquat(self.gt_keypoints, self.goal_keypoints, self.object_pos)  # [B,4]
 
-        rel_quat = keypoints_to_relquat(self.embeddings[:, 3:].reshape(-1, 8, 3), self.goal_keypoints, self.embeddings[:,:3])  # [B,4]
+        rel_quat = keypoints_to_relquat(self.embeddings[:, 3:].reshape(-1, 8, 3), self.goal_keypoints)  # [B,4]
 
         # 6) Logging
         if "log" not in self.extras:
