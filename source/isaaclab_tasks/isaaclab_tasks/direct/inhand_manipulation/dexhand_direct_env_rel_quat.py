@@ -29,6 +29,7 @@ from cprint import cprint
 import datetime
 import os
 
+
 CURRENT_TIME = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
 
 @configclass
@@ -74,7 +75,12 @@ class DexHandDirectEnvRelQuat(InHandManipulationRealEnv):
 
         # 1) GT keypoints in world
         size = (2 * 0.03 * self.cfg.object_scale[0], 2 * 0.03 * self.cfg.object_scale[1], 2 * 0.03 * self.cfg.object_scale[2])
-
+        
+        # Compute ground truth keypoints (object's current pose)
+        compute_keypoints(
+            pose=torch.cat((self.object_pos, self.object_rot), dim=1), size=size, out=self.gt_keypoints
+        )
+        
         # 5) Goal keypoints and relative quaternion target
         compute_keypoints(
             pose=torch.cat((torch.zeros_like(self.goal_pos), self.goal_rot), dim=1), size=size, out=self.goal_keypoints

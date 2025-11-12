@@ -10,10 +10,18 @@ import torch
 from isaaclab.utils.math import quat_apply, quat_conjugate, quat_mul
 import math
 
-def kabsch_R(A, B):  # A,B: [N,3] centered keypoints
-    H = A.T @ B                         # [3,3]
+def kabsch_R(A, B):  # A,B: [B,N,3] centered keypoints
+    # B: batch dimension
+    H = torch.matmul(A.transpose(1, 2), B)  # [B, 3, 3]
     U, S, Vt = torch.linalg.svd(H)
-    R = U @ torch.diag(torch.tensor([1,1, torch.sign(torch.linalg.det(U @ Vt))], device=A.device)) @ Vt
+    
+    # Create a diagonal matrix with determinant sign
+    batch_dim = A.shape[0]
+    diag = torch.ones((batch_dim, 3, 3), device=A.device)
+    diag[:, 2, 2] = torch.sign(torch.linalg.det(torch.matmul(U, Vt)))
+    
+    # Compute rotation matrices
+    R = torch.matmul(torch.matmul(U, diag), Vt)
     return R
 
 #  reference: https://github.com/facebookresearch/pytorch3d/blob/2d4d345b6fd2720580bff5f63dcbd3b230b43996/pytorch3d/transforms/rotation_conversions.py#L375
@@ -309,7 +317,7 @@ def keypoints_to_relquat(K_obj, K_goal, obj_center):
     # K_obj: [B,8,3] world; K_goal: [B,8,3] world(=0+R_g*corners); obj_center: [B,3]
     A = K_obj - obj_center.unsqueeze(1)   # center
     B = K_goal                             # center at 0
-    R_rel = torch.stack([kabsch_R(A[i], B[i]) for i in range(A.shape[0])], dim=0)  # [B,3,3]
+    R_rel = kabsch_R(A, B)  # [B,3,3] - now batched!
     q_rel = matrix_to_quaternion(R_rel)
     return q_rel
 
@@ -329,16 +337,44 @@ def compute_keypoints(
         out: Buffer to store keypoints. If None, a new buffer will be created.
     """
     num_envs = pose.shape[0]
+    
     if out is None:
-        out = torch.ones(num_envs, num_keypoints, 3, dtype=torch.float32, device=pose.device)
-    else:
-        out[:] = 1.0
-    for i in range(num_keypoints):
-        # which dimensions to negate
-        n = [((i >> k) & 1) == 0 for k in range(3)]
-        corner_loc = ([(1 if n[k] else -1) * s / 2 for k, s in enumerate(size)],)
-        corner = torch.tensor(corner_loc, dtype=torch.float32, device=pose.device) * out[:, i, :]
-        # express corner position in the world frame
-        out[:, i, :] = pose[:, :3] + quat_apply(pose[:, 3:7], corner)
+        out = torch.zeros(num_envs, num_keypoints, 3, dtype=torch.float32, device=pose.device)
+    
+    # Precompute all 8 local corner positions once
+    half_size = torch.tensor([size[0]/2, size[1]/2, size[2]/2], dtype=pose.dtype, device=pose.device)
+    
+    # Generate all 8 possible sign combinations for the 3 dimensions
+    # Each bit in the index (0-7) represents the sign for a dimension:
+    # bit 0: x-axis, bit 1: y-axis, bit 2: z-axis
+    # 0 = positive, 1 = negative
+    local_corners = torch.tensor([
+        [1.0, 1.0, 1.0],   # 0: 000 - x+, y+, z+
+        [1.0, 1.0, -1.0],  # 1: 001 - x+, y+, z-
+        [1.0, -1.0, 1.0],  # 2: 010 - x+, y-, z+
+        [1.0, -1.0, -1.0],  # 3: 011 - x+, y-, z-
+        [-1.0, 1.0, 1.0],  # 4: 100 - x-, y+, z+
+        [-1.0, 1.0, -1.0],  # 5: 101 - x-, y+, z-
+        [-1.0, -1.0, 1.0],  # 6: 110 - x-, y-, z+
+        [-1.0, -1.0, -1.0],  # 7: 111 - x-, y-, z-
+    ], dtype=pose.dtype, device=pose.device) * half_size
+    
+    # Apply rotation and translation to all corners at once
+    # Reshape pose and local_corners for batch processing
+    # pose[:, 3:7] shape: [B, 4]
+    # Reshape to [B, 8, 4] for broadcasting
+    batch_quats = pose[:, 3:7].unsqueeze(1).expand(-1, num_keypoints, -1)  # [B, 8, 4]
+    
+    # local_corners shape: [8, 3]
+    # Reshape to [B, 8, 3] for broadcasting
+    batch_corners = local_corners.unsqueeze(0).expand(num_envs, -1, -1)  # [B, 8, 3]
+    
+    # Apply quaternion rotation to all corners for all environments at once
+    # quat_apply should support (B, N, 4) quats and (B, N, 3) vectors
+    rotated_corners = quat_apply(batch_quats, batch_corners)  # [B, 8, 3]
+    
+    # Add position to get world coordinates
+    # pose[:, :3] shape: [B, 3] → reshape to [B, 1, 3] to broadcast to [B, 8, 3]
+    out[:, :, :] = pose[:, :3].unsqueeze(1) + rotated_corners
 
     return out
