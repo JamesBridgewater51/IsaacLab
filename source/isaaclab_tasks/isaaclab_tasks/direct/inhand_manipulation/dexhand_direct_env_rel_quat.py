@@ -24,10 +24,69 @@ from isaaclab.utils import configclass
 from isaaclab_tasks.direct.inhand_manipulation.inhand_manipulation_env import InHandManipulationEnv, unscale
 from isaaclab_tasks.direct.inhand_manipulation.inhand_manipulation_real_env import InHandManipulationRealEnv
 from isaaclab_tasks.direct.o12_hand.o12_hand_env_cfg import O12HandSim2RealEnvCfg as DexHandEnvCfg
-from .utils import *
+from isaaclab.utils.math import quat_mul, quat_conjugate, quat_apply
 from cprint import cprint
 import datetime
 import os
+
+def kabsch_R(A, B):  # A,B: [B,8,3] centered keypoints. (B,N,3)
+    # Batched implementation. Each batch: A[i], B[i] are (N,3).
+    # Calculate H for each batch.
+    # H = (A.transpose(-2, -1) @ B): (B,3,3)
+    H = torch.matmul(A.transpose(-2, -1), B)  # (B,3,3)
+    U, S, Vt = torch.linalg.svd(H)            # U,Vt: (B,3,3)
+    eps = 1e-8
+    det = torch.linalg.det(torch.matmul(U, Vt))
+    eye = torch.eye(3, device=A.device, dtype=A.dtype).unsqueeze(0).expand(U.shape[0], 3, 3)
+    sign_fix = torch.ones(U.shape[0], 3, device=A.device, dtype=A.dtype)
+    sign_fix[:, 2] = torch.sign(det)
+    D = torch.diag_embed(sign_fix)            # (B,3,3)
+    R = torch.matmul(torch.matmul(U, D), Vt)  # (B,3,3)
+    return R
+
+def keypoints_to_relquat(K_obj, K_goal, obj_center):
+    # K_obj: [B,8,3] world; K_goal: [B,8,3] world(=0+R_g*corners); obj_center: [B,3]
+    A = K_obj - obj_center.unsqueeze(1)   # center, (B,8,3)
+    B = K_goal                             # center at 0, (B,8,3)
+    R_rel = kabsch_R(A, B)                 # (B,3,3), batch version
+    # 3x3 -> quat (w,x,y,z)
+    def rotmat_to_quat(R):
+        qw = torch.sqrt(torch.clamp(1.0 + torch.diagonal(R, dim1=1, dim2=2).sum(dim=1), min=1e-6)) / 2
+        qx = (R[:,2,1]-R[:,1,2])/(4*qw); qy = (R[:,0,2]-R[:,2,0])/(4*qw); qz = (R[:,1,0]-R[:,0,1])/(4*qw)
+        return torch.stack([qw,qx,qy,qz], dim=1)
+    q_rel = rotmat_to_quat(R_rel)
+    # 也可输出 6D 表示：R_rel[:,:2].reshape(B,6)
+    return q_rel
+
+@torch.jit.script
+def compute_keypoints(
+    pose: torch.Tensor,
+    num_keypoints: int = 8,
+    size: tuple[float, float, float] = (2 * 0.03, 2 * 0.03, 2 * 0.03),
+    out: torch.Tensor | None = None,
+):
+    """Computes positions of 8 corner keypoints of a cube.
+
+    Args:
+        pose: Position and orientation of the center of the cube. Shape is (N, 7)
+        num_keypoints: Number of keypoints to compute. Default = 8
+        size: Length of X, Y, Z dimensions of cube. Default = [0.06, 0.06, 0.06]
+        out: Buffer to store keypoints. If None, a new buffer will be created.
+    """
+    num_envs = pose.shape[0]
+    if out is None:
+        out = torch.ones(num_envs, num_keypoints, 3, dtype=torch.float32, device=pose.device)
+    else:
+        out[:] = 1.0
+    for i in range(num_keypoints):
+        # which dimensions to negate
+        n = [((i >> k) & 1) == 0 for k in range(3)]
+        corner_loc = ([(1 if n[k] else -1) * s / 2 for k, s in enumerate(size)],)
+        corner = torch.tensor(corner_loc, dtype=torch.float32, device=pose.device) * out[:, i, :]
+        # express corner position in the world frame
+        out[:, i, :] = pose[:, :3] + quat_apply(pose[:, 3:7], corner)
+
+    return out
 
 
 CURRENT_TIME = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
@@ -70,39 +129,13 @@ class DexHandDirectEnvRelQuat(InHandManipulationRealEnv):
 
 
     def _compute_rel_quat_observations(self):
-        
-        self._compute_intermediate_values()
-
-        # 1) GT keypoints in world
         size = (2 * 0.03 * self.cfg.object_scale[0], 2 * 0.03 * self.cfg.object_scale[1], 2 * 0.03 * self.cfg.object_scale[2])
-        
-        # Compute ground truth keypoints (object's current pose)
+        compute_keypoints(pose=torch.cat((self.object_pos, self.object_rot), dim=1), size=size, out=self.gt_keypoints)
+
         compute_keypoints(
-            pose=torch.cat((self.object_pos, self.object_rot), dim=1), size=size, out=self.gt_keypoints
+            pose=torch.cat((torch.zeros_like(self.goal_pos), self.goal_rot), dim=1), size=size, out=self.goal_keypoints
         )
-        
-        # 5) Goal keypoints and relative quaternion target
-        compute_keypoints(
-            pose=torch.cat((self.goal_pos, self.goal_rot), dim=1), size=size, out=self.goal_keypoints
-        )
-        # Ground-truth rel_quat
-        rel_quat = keypoints_to_relquat(self.gt_keypoints, self.goal_keypoints)  # [B,4]
-
-        # GT relative quat: computed from object_rot and goal_rot
-        # Compute the relative quaternion between object_rot and goal_rot using quaternion multiplication rules.
-        # The relative quaternion q_rel satisfies: object_rot = q_rel * goal_rot  =>  q_rel = object_rot * conjugate(goal_rot)
-        # (Assuming both are in w,x,y,z order.)
-        object_rot = self.object_rot           # shape: (B,4)
-        goal_rot = self.goal_rot               # shape: (B,4)
-        rel_quat_gt = quat_mul(object_rot, quat_conjugate(goal_rot))   # shape: (B,4)
-        rel_quat_gt = standardize_quaternion(rel_quat_gt)
-
-        # Compare with rel_quat computed above (should be the same if rel_quat computation is correct)
-        diff = torch.norm(rel_quat - rel_quat_gt, p=2, dim=1)  # norm per batch
-        if torch.any(diff > 1e-3):
-            breakpoint()
-            print("Warning: rel_quat and rel_quat_gt disagree! Max diff: ", diff.max().item())
-
+        rel_quat = keypoints_to_relquat(self.gt_keypoints, self.goal_keypoints, self.object_pos)  # [B,4]
 
         # Add small quaternion noise using quaternion multiplication for robustness
         # FIXME: remove this noise to test previous scuesuccessfully trained checkpoint.
@@ -121,23 +154,28 @@ class DexHandDirectEnvRelQuat(InHandManipulationRealEnv):
         rel_quat_noisy = rel_quat_noisy / rel_quat_noisy.norm(dim=1, keepdim=True).clamp(min=1e-8)
         rel_quat = rel_quat_noisy
 
-
         return rel_quat
+
 
     def _compute_proprio_observations(self):
         """Proprioception observations from physics."""
-
+        # default size of Nuclues server's cube is 0.06m
+        size = (2 * 0.03 * self.cfg.object_scale[0], 2 * 0.03 * self.cfg.object_scale[1], 2 * 0.03 * self.cfg.object_scale[2])
+        # NOTE: use zero-positioned cube's keypoints as goal keypoints.
+        zero_pos_goal_keypoints = self.goal_keypoints.clone()
+        compute_keypoints(pose=torch.cat((torch.zeros_like(self.goal_pos), self.goal_rot), dim=1), size=size, out=zero_pos_goal_keypoints)
+   
         obs_components = []
         
         # Add hand joint velocities if enabled
         if self.cfg.include_vel_in_obs:
             obs_components.append(self.cfg.vel_obs_scale * self.hand_dof_vel)
-        
-        # Add remaining components
+
         # NOTE: add small noise to object_pos, since when transferred to real, we dont' have ground-truth object_pos.
         object_pos_noise = torch.randn((self.num_envs, 3), device=self.object_pos.device) * 0.01
         object_pos = self.object_pos + object_pos_noise
 
+        # Add remaining components
         obs_components.extend([
             # current object position
             object_pos,
@@ -166,7 +204,7 @@ class DexHandDirectEnvRelQuat(InHandManipulationRealEnv):
     def _get_observations(self) -> dict:
         # proprioception observations
         state_obs = self._compute_proprio_observations()
-        # vision observations from CMM
+        # relative quaternion observations
         rel_quat_obs = self._compute_rel_quat_observations()
         obs = torch.cat((state_obs, rel_quat_obs), dim=-1)
         # asymmetric critic states
