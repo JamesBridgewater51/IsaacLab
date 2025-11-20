@@ -41,6 +41,7 @@ def main():
     cfg.feature_extractor.base_dir = os.path.join("runs", args_cli.run_name)
     cfg.feature_extractor.write_image_to_file = False  # set True if you want RGB dumps
     cfg.feature_extractor.save_data_to_file = False  # set True if you want to save data
+    cfg.feature_extractor.object_scale = (0.6, 0.6, 0.6)
 
     # instantiate
     env = DexHandVisionDREnv(cfg, render_mode=None)

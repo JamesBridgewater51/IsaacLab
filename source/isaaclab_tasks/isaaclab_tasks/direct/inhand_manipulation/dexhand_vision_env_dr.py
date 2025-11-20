@@ -473,7 +473,6 @@ class DexHandVisionDREnv(DexHandVisionEnv):
                 "brightness",
                 "contrast", 
                 "gamma",
-                "log",
                 "saturation",
                 "sharpness"
             ]
@@ -484,7 +483,7 @@ class DexHandVisionDREnv(DexHandVisionEnv):
             
             for enh_type in chosen_enhancements:
                 if enh_type == "brightness":
-                    brightness_factor = torch.empty(B).uniform_(-0.4, 0.35).to(img_aug.device)
+                    brightness_factor = torch.empty(B).uniform_(-0.6, 0.35).to(img_aug.device)
                     img_aug = Kenh.adjust_brightness(img_aug, brightness_factor, clip_output=True)
                     
                 elif enh_type == "contrast":
@@ -492,15 +491,10 @@ class DexHandVisionDREnv(DexHandVisionEnv):
                     img_aug = Kenh.adjust_contrast(img_aug, contrast_factor)
                     
                 elif enh_type == "gamma":
-                    gamma = torch.empty(B).uniform_(1.1, 5.0).to(img_aug.device)
-                    gain = torch.empty(B).uniform_(0.9, 1.0).to(img_aug.device)  # Optional gain variation
+                    gamma = torch.empty(B).uniform_(1.1, 7.5).to(img_aug.device)
+                    gain = torch.empty(B).uniform_(0.8, 1.0).to(img_aug.device)  # Optional gain variation
                     img_aug = Kenh.adjust_gamma(img_aug, gamma, gain)
-                    
-                elif enh_type == "log":
-                    log_gain = torch.empty(B).uniform_(0.5, 1.0).to(img_aug.device)
-                    log_gain_expand = log_gain.view(B, 1, 1, 1)  # (B,1,1,1)
-                    img_aug = torch.log1p(log_gain_expand * img_aug) / torch.log1p(log_gain_expand)
-                    
+
                 elif enh_type == "saturation":
                     saturation_factor = torch.empty(B).uniform_(0.20, 4.0).to(img_aug.device)
                     img_aug = Kenh.adjust_saturation(img_aug, saturation_factor)
@@ -594,12 +588,13 @@ class DexHandVisionDREnv(DexHandVisionEnv):
             tensor = torch.from_numpy(image).permute(0, 3, 1, 2)  # (B,C,H,W)
             cols = int(math.ceil(math.sqrt(n_imgs)))
             grid = torchvision.utils.make_grid(tensor, nrow=cols, padding=2) # (C,H,W)
-            VIS_IMG_ONLINE = False
+            VIS_IMG_ONLINE = True
+            SAVE_IMG = False
             if VIS_IMG_ONLINE:
                 _grid = grid.permute(1, 2, 0).cpu().numpy() # (H,W,C)
                 grid_bgr = cv2.cvtColor((_grid * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
                 cv2.imshow("ground-truth-tiled-camera", grid_bgr)
-                if hasattr(self, "_sim_step_counter") and (self._sim_step_counter % 12 == 0):
+                if SAVE_IMG and hasattr(self, "_sim_step_counter") and (self._sim_step_counter % 12 == 0):
                     cv2.imwrite(f"./dexhand_vision_env_o12_hand_{self._sim_step_counter // 12}.png", grid_bgr)
                 cv2.waitKey(1)
             # Write to tensor board
@@ -610,14 +605,15 @@ class DexHandVisionDREnv(DexHandVisionEnv):
 
         # --------------------------------------------------------
         # [STEP 3] Forward to feature extractor with augmented input
-        pose_loss, pred_obj_pose = self.feature_extractor.step(
+        # breakpoint()
+        pose_loss, pred_obj_pose , terms, debug_info= self.feature_extractor.step(
             rgb_img=(rgb_img_input * 255.0).clamp(0, 255).to(torch.uint8),
             depth_img=None,
             gt_pose=object_pose,
             gt_uv=torch.stack([u, v], dim=-1),
             mask=valid_mask,
             model_kwargs=model_kwargs,
-            camera_convention=self.cfg._camera.offset.convention,
+            camera_convention="opengl" if hasattr(self, "camera_randomizer") else self.cfg._camera.offset.convention,
         )
 
         # DEBUG: visualize model predictions
@@ -626,8 +622,8 @@ class DexHandVisionDREnv(DexHandVisionEnv):
         if DBG_PRED_CAMERA_PROJS:
 
             # NOTE: naming variable to avoid overwrite previous variable.
-            pred_valid_mask, (pred_u, pred_v, pred_visible) = _project_and_visible(pred_obj_pose.reshape(-1, 9, 3), fx, fy, cx, cy, W, H, convention=self.cfg._camera.offset.convention)  # (B,)
-            
+            pred_valid_mask, (pred_u, pred_v, pred_visible) = _project_and_visible(pred_obj_pose.reshape(-1, 9, 3), fx, fy, cx, cy, W, H, convention="opengl" if hasattr(self, "camera_randomizer") else self.cfg._camera.offset.convention)  # (B,)
+
             # get raw rgb (expect shape (B,H,W,3) or (H,W,3) and dtype uint8 or float in [0,1])
             image_raw = rgb_img_input.clone()
 
@@ -681,14 +677,15 @@ class DexHandVisionDREnv(DexHandVisionEnv):
             image = drawn.astype(np.float32) / 255.0
             tensor = torch.from_numpy(image).permute(0, 3, 1, 2)  # (B,C,H,W)
             cols = int(math.ceil(math.sqrt(n_imgs)))
-            grid = torchvision.utils.make_grid(tensor, nrow=cols, padding=2)
-            VIS_IMG_ONLINE = False
+            grid = torchvision.utils.make_grid(tensor, nrow=cols, padding=2) # (C, H, W)
+            VIS_IMG_ONLINE = True
+            SAVE_IMG = False
             # NOTE: this is after `step` call, so we need to subtract 1 to get the previous step.
             if VIS_IMG_ONLINE:
                 _grid = grid.permute(1, 2, 0).cpu().numpy()
                 grid_bgr = cv2.cvtColor((_grid * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
                 cv2.imshow("predicted-tiled-camera", grid_bgr)
-                if hasattr(self, "_sim_step_counter") and (self._sim_step_counter % 12 == 0):
+                if SAVE_IMG and hasattr(self, "_sim_step_counter") and (self._sim_step_counter % 12 == 0):
                     cv2.imwrite(f"./dexhand_vision_env_o12_hand_{self._sim_step_counter // 12}.png", grid_bgr)
                 cv2.waitKey(1)
             WRITE_TB = True

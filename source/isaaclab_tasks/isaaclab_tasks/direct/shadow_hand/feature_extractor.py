@@ -27,19 +27,42 @@ def make_2d_gaussian_heatmap(H, W, centers_uv, sigma):
     """
     centers_uv: (..., 2) pixel coords (x=col=u, y=row=v)
     returns: heatmaps (..., H, W)
+    Requirements satisfied:
+      - if centers_uv are out of (H,W) bound, the heatmaps are all zero.
+      - if centers_uv is in bounds, returns a heatmap peaked at center_uv, large value near center, close to 0 far.
+      - The descent of heatmap is steep with distance.
     """
     device = centers_uv.device
     dtype = centers_uv.dtype
     xs = torch.arange(0, W, device=device, dtype=dtype)
     ys = torch.arange(0, H, device=device, dtype=dtype)
     grid_x, grid_y = torch.meshgrid(xs, ys, indexing='xy')  # (H,W)
-    grid_x = grid_x.unsqueeze(0)  # (1,H,W)
-    grid_y = grid_y.unsqueeze(0)
-    # centers_uv shape: (B, K, 2)
+    grid_x = grid_x.unsqueeze(0)  # (1, H, W)
+    grid_y = grid_y.unsqueeze(0)  # (1, H, W)
+
     cx = centers_uv[..., 0].unsqueeze(-1).unsqueeze(-1)  # (...,1,1)
-    cy = centers_uv[..., 1].unsqueeze(-1).unsqueeze(-1)
-    exponent = ((grid_x - cx)**2 + (grid_y - cy)**2) / (2.0 * (sigma**2))
+    cy = centers_uv[..., 1].unsqueeze(-1).unsqueeze(-1)  # (...,1,1)
+
+    # Check in-bounds for each center
+    in_x = (cx >= 0) & (cx < W)
+    in_y = (cy >= 0) & (cy < H)
+    in_bounds = (in_x & in_y).float()                     # (...,1,1) float mask: 1 if in bounds else 0
+
+    # Use a small sigma for fast value descent if not already, e.g. sigma=2
+    # But we allow passing custom sigma argument for flexibility.
+    # The value at (cx,cy) will be exactly 1 before masking.
+
+    # Compute the exponent term
+    # Steep descent for small sigma. Recommend sigma in [1.5, 2] for pixel coords
+    exponent = ((grid_x - cx) ** 2 + (grid_y - cy) ** 2) / (2.0 * (sigma ** 2))
     heat = torch.exp(-exponent)
+    # Normalize so max is ~1 if visible
+    heat = heat / (heat.amax(dim=(-2, -1), keepdim=True) + 1e-10)
+    # For out-of-bounds, set to all zeros
+    heat = heat * in_bounds
+
+    if torch.isnan(heat).any():
+        breakpoint()
     return heat  # (..., H, W)
 
 def pairwise_edge_targets_for_cube(size_xyz):
@@ -99,6 +122,9 @@ class FeatureExtractorCfg:
     base_dir: str = ""
     "base dir"
 
+    object_scale: tuple[float, float, float] = (0.6, 0.6, 0.6)
+    """Object scale in x, y, z directions. Default is (0.6, 0.6, 0.6)."""
+
 # FiLM MLP for stage: inputs intrinsics (6) + optional global pooled feature vector
 def make_film_mlp(in_dim, out_dim):
     return nn.Sequential(
@@ -117,7 +143,7 @@ def soft_argmax_2d(heatmaps, eps=1e-6):
     device = heatmaps.device
     ys = torch.linspace(0, H-1, H, device=device, dtype=heatmaps.dtype)
     xs = torch.linspace(0, W-1, W, device=device, dtype=heatmaps.dtype)
-    grid_x, grid_y = torch.meshgrid(xs, ys, indexing='xy')  # (W,H)
+    grid_x, grid_y = torch.meshgrid(xs, ys, indexing='xy')  # (H,W)
     grid_x = grid_x.unsqueeze(0).unsqueeze(0)  # (1,1,H,W)
     grid_y = grid_y.unsqueeze(0).unsqueeze(0)
     x = (prob * grid_x).sum(dim=[2,3])
@@ -185,20 +211,14 @@ class FeatureExtractor:
             self._objpose_array = []
 
         # Precompute cube edge distances & edges for rigidity loss (use same size used in env)
-        # If cfg contains object_scale or object size, use it, else default 0.06 cube
-        obj_scale = getattr(self.cfg, "object_scale", (1.0,1.0,1.0))
-        # default cube side = 0.06 * scale (match your compute_keypoints usage)
-        side = 0.06 * float(obj_scale[0])
-        size_vec = (side, side, side)
-        self._cube_edge_targets, self._cube_edges = pairwise_edge_targets_for_cube(size_vec)
+        self._cube_edge_targets, self._cube_edges = pairwise_edge_targets_for_cube(self.cfg.object_scale)
         # store heatmap sigma (in pixels) and heatmap stride
-        self.heatmap_sigma = getattr(self.cfg, "heatmap_sigma", 1.5)  # tune 1.5-4.0
-        self.heatmap_stride = getattr(self.cfg, "heatmap_stride", 4)  # model produces low-res heatmaps at /4
+        self.heatmap_sigma = 0.05
         # loss weights
-        self.w_heatmap = getattr(self.cfg, "w_heatmap", 1.0)
-        self.w_coord   = getattr(self.cfg, "w_coord", 1.0)
-        self.w_depth   = getattr(self.cfg, "w_depth", 0.5)
-        self.w_rigid   = getattr(self.cfg, "w_rigid", 1.0)
+        self.w_heatmap = 1.0
+        self.w_coord   = 1.0
+        self.w_depth   = 0.5
+        self.w_rigid   = 100.0
 
     def _compute_losses(self, model_out, gt_pose_cam, gt_uv, intrinsics, valid_mask, camera_convention: Literal["opengl", "world", "ros"], H, W):
         """
@@ -222,23 +242,21 @@ class FeatureExtractor:
         cx = intrinsics[:,2].view(B,1,1)
         cy = intrinsics[:,3].view(B,1,1)
         pz = -pred_depths.unsqueeze(-1)
+        # NOTE: 从 pred_coords 到 pred_xyz 转换需要先 unproject 到相机坐标系，然后执行 从 规整相机坐标系到 `camera_convention` 坐标系的转换.
+        # 规整相机坐标系指的就是 经典的 pihhole camera 模型, xy轴 和投影的 uv 像素平面的 u,v 轴一致, z轴按照右手坐标系定则 指向 相机前方. 
+        # NOTE: unproject 和 相机坐标系的转换 尽量分开来做， 不然会混淆.
+        unprojected_z = pz
+        unprojected_x = (px - cx) * unprojected_z / fx
+        unprojected_y = (py - cy) * unprojected_z / fy
         if camera_convention == "opengl":
-            z = -pz
-            x = (px - cx) * z / fx
-            y = (py - cy) * z / fy
-            y = -y
+            x, y, z = unprojected_x, -unprojected_y, -unprojected_z
             pred_xyz = torch.cat([x, y, z], dim=-1)
         elif camera_convention == "ros":
-            pred_xyz = torch.cat([
-                (px - cx) * pz / fx,
-                (py - cy) * pz / fy,
-                pz
-            ], dim=-1)
+            x, y, z = unprojected_x, unprojected_y, unprojected_z
+            pred_xyz = torch.cat([x, y, z], dim=-1)
         elif camera_convention == "world":
-            x = pz
-            y = - (px - cx) * x / fx
-            z_ = - (py - cy) * x / fy
-            pred_xyz = torch.cat([x, y, z_], dim=-1)
+            x, y, z = unprojected_z, -unprojected_x, -unprojected_y
+            pred_xyz = torch.cat([x, y, z], dim=-1)
         else:
             raise ValueError(f"Unknown camera_convention '{camera_convention}', must be one of ('opengl','ros','world')")
 
@@ -283,6 +301,23 @@ class FeatureExtractor:
         target_hm_grid = torchvision.utils.make_grid(target_hm.view(B*K, 1, target_hm.shape[-2], target_hm.shape[-1]), nrow=K, padding=2, pad_value=0)
         self.tb_writer.add_image("target_hm_grid", target_hm_grid.cpu(), global_step=self.step_count)
 
+        VIS_IMG_ONLINE = False
+        if VIS_IMG_ONLINE:
+            import cv2;
+            target_hm_grid_bgr = cv2.cvtColor(target_hm_grid.permute(1, 2, 0).cpu().numpy() * 255, cv2.COLOR_RGB2BGR)
+            cv2.imshow("target_hm", target_hm_grid_bgr)
+            pred_hm_grid = torchvision.utils.make_grid(model_out['heatmaps'].view(B*K, 1, model_out['heatmaps'].shape[-2], model_out['heatmaps'].shape[-1]), nrow=K, padding=2, pad_value=0)
+            pred_hm_grid_bgr = cv2.cvtColor(pred_hm_grid.permute(1, 2, 0).cpu().numpy() * 255, cv2.COLOR_RGB2BGR)
+            cv2.imshow("pred_hm", pred_hm_grid_bgr)
+            cv2.waitKey(1)
+
+            # pred_coords = model_out['coords']
+            # pred_coords_heatmap = make_2d_gaussian_heatmap(H, W, pred_coords, sigma=self.heatmap_sigma)
+            # pred_coords_heatmap_grid = torchvision.utils.make_grid(pred_coords_heatmap.view(B*K, 1, pred_coords_heatmap.shape[-2], pred_coords_heatmap.shape[-1]), nrow=K, padding=2, pad_value=0)
+            # pred_coords_heatmap_grid_bgr = cv2.cvtColor(pred_coords_heatmap_grid.permute(1, 2, 0).cpu().numpy() * 255, cv2.COLOR_RGB2BGR)
+            # cv2.imshow("pred_coords_heatmap", pred_coords_heatmap_grid_bgr)
+            # cv2.waitKey(1)
+
         # Heatmap loss (MSE)
         pred_hm = model_out['heatmaps'] # (B,K,Hh,Wh) range: [0,1]
         # Apply valid mask to valid samples in the batch
@@ -321,41 +356,6 @@ class FeatureExtractor:
                 depth_loss = self.depth_loss_fn(pred_depths[valid_mask], gt_depths[valid_mask]).mean()
             else:
                 depth_loss = self.depth_loss_fn(pred_depths, gt_depths).mean()
-
-        # Rigidity / edge-length loss: compute pairwise distances of predicted 3D points (reconstruct using pred pixel coords and pred depths)
-        px = pred_coords[..., 0].unsqueeze(-1)  # (B,K,1)
-        py = pred_coords[..., 1].unsqueeze(-1)
-        fx = intrinsics[:,0].view(B,1,1)  # (B,1,1)
-        fy = intrinsics[:,1].view(B,1,1)
-        cx = intrinsics[:,2].view(B,1,1)
-        cy = intrinsics[:,3].view(B,1,1)
-
-        pz = -pred_depths.unsqueeze(-1)
-        if camera_convention == "opengl":
-            z = -pz
-            x = (px - cx) * z / fx
-            y = (py - cy) * z / fy
-            # But y = -points_cam[...,1] in projection, so to get points_cam[...,1] use y' = -y
-            # So adjust y to invert:
-            y = -y
-            pred_xyz = torch.cat([x, y, z], dim=-1)
-        elif camera_convention == "ros":
-            # ROS: forward axis: +Z, up axis: -Y
-
-            pred_xyz = torch.cat([
-                (px - cx) * pz / fx,
-                (py - cy) * pz / fy,
-                pz
-            ], dim=-1)
-        elif camera_convention == "world":
-            # World: forward axis: +X, up axis: +Z
-            x = pz
-            y = - (px - cx) * x / fx
-            z_ = - (py - cy) * x / fy
-            pred_xyz = torch.cat([x, y, z_], dim=-1)
-        else:
-            raise ValueError(f"Unknown camera_convention '{camera_convention}', must be one of ('opengl','ros','world')")
-        # NOTE: pred_xyz 就是相机坐标系下的点坐标，这里z轴已经经过了两次负号处理，所以还原回来了.
 
         # compute predicted edge distances
         if valid_mask is not None:
@@ -548,7 +548,7 @@ class FeatureExtractor:
             # compute pred_xyz (x = (u-cx)*z/fx, y=(v-cy)*z/fy)
          
             pred_obj_pose = debug_info['pred_xyz'].reshape(B, -1).detach()
-            return total_loss.detach(), pred_obj_pose
+            return total_loss.detach(), pred_obj_pose, terms, debug_info
 
         else:
             # inference mode
@@ -626,6 +626,7 @@ class ImprovedResNet50PoseNet(nn.Module):
         self.backbone = backbone
 
         # lateral sizes (ResNet outputs)
+        in_c2 = 256   # layer1
         in_c3 = 512   # layer2
         in_c4 = 1024  # layer3
         in_c5 = 2048  # layer4
@@ -635,8 +636,24 @@ class ImprovedResNet50PoseNet(nn.Module):
         self.lat_c5 = nn.Conv2d(in_c5, lateral, kernel_size=1)
         self.lat_c4 = nn.Conv2d(in_c4, lateral, kernel_size=1)
         self.lat_c3 = nn.Conv2d(in_c3, lateral, kernel_size=1)
+        self.lat_c2 = nn.Conv2d(in_c2, lateral, kernel_size=1)
         self.smooth4 = nn.Conv2d(lateral, lateral, kernel_size=3, padding=1)
         self.smooth3 = nn.Conv2d(lateral, lateral, kernel_size=3, padding=1)
+
+        # decoder/up-sampling blocks to reach stride 2 heatmaps
+        self.decode4 = nn.Sequential(
+            nn.Conv2d(lateral * 2, lateral, kernel_size=3, padding=1),
+            nn.GroupNorm(num_groups=8, num_channels=lateral),
+            nn.ReLU(inplace=True)
+        )
+        self.decode2 = nn.Sequential(
+            nn.Conv2d(lateral, lateral, kernel_size=3, padding=1),
+            nn.GroupNorm(num_groups=8, num_channels=lateral),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(lateral, lateral, kernel_size=3, padding=1),
+            nn.GroupNorm(num_groups=8, num_channels=lateral),
+            nn.ReLU(inplace=True)
+        )
 
         # context MLP from layer4 pooled features (optionally with intrinsics)
         context_in_dim = in_c5 + (4 if self.use_intrinsics_in_context else 0)
@@ -649,38 +666,38 @@ class ImprovedResNet50PoseNet(nn.Module):
         if self.use_film:
             film_in_dim = 128  # only pooled context after self.context_conv, with/without intrinsics
             self.film_mlps = nn.ModuleList([
-                make_film_mlp(film_in_dim, lateral * 2),  # for layer2 -> lat_c3
-                make_film_mlp(film_in_dim, lateral * 2),  # for layer3 -> lat_c4
-                make_film_mlp(film_in_dim, lateral * 2),  # for layer4 -> lat_c5
+                make_film_mlp(film_in_dim, in_c3 * 2),  # for layer2 (512 channels) -> needs 1024 output
+                make_film_mlp(film_in_dim, in_c4 * 2),  # for layer3 (1024 channels) -> needs 2048 output
+                make_film_mlp(film_in_dim, in_c5 * 2),  # for layer4 (2048 channels) -> needs 4096 output
             ])
         else:
             self.film_mlps = None
 
         # final fuse to 128 channels
         self.fuse = nn.Sequential(
-            nn.Conv2d(lateral, 128, kernel_size=3, padding=1),
-            nn.GroupNorm(num_groups=8, num_channels=128),
+            nn.Conv2d(lateral, lateral, kernel_size=3, padding=1),
+            nn.GroupNorm(num_groups=8, num_channels=lateral),
             nn.ReLU(inplace=True),
             nn.Dropout2d(p=0.15)
         )
 
         # heads
         self.heatmap_head = nn.Sequential(
-            nn.Conv2d(128, 128, 3, padding=1),
+            nn.Conv2d(lateral, lateral, 3, padding=1),
             nn.ReLU(inplace=True),
-            nn.Conv2d(128, K, 1)
+            nn.Conv2d(lateral, K, 1)
         )
         self.depth_head = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten(),
-            nn.Linear(128, 128),
+            nn.Linear(lateral, lateral),
             nn.ReLU(inplace=True),
             nn.Dropout(0.2),
-            nn.Linear(128, K)
+            nn.Linear(lateral, K)
         )
 
         # init lateral/smooth/fuse convs
-        for m in [self.lat_c5, self.lat_c4, self.lat_c3, self.smooth4, self.smooth3]:
+        for m in [self.lat_c5, self.lat_c4, self.lat_c3, self.lat_c2, self.smooth4, self.smooth3]:
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
                 if m.bias is not None:
@@ -688,6 +705,11 @@ class ImprovedResNet50PoseNet(nn.Module):
         for m in self.fuse.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+        for m in list(self.decode4.modules()) + list(self.decode2.modules()):
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
 
     def _apply_film(self, feat, film_params):
         # film_params: (B, C*2)
@@ -732,10 +754,10 @@ class ImprovedResNet50PoseNet(nn.Module):
         out = self.backbone.bn1(out)
         out = self.backbone.relu(out)
         out = self.backbone.maxpool(out)
-        layer1 = self.backbone.layer1(out)   # /4
-        layer2 = self.backbone.layer2(layer1)  # /8
-        layer3 = self.backbone.layer3(layer2)  # /16
-        layer4 = self.backbone.layer4(layer3)  # /32
+        layer1 = self.backbone.layer1(out)   # C: 256 (stride 4)
+        layer2 = self.backbone.layer2(layer1)  # C: 512 (stride 8)
+        layer3 = self.backbone.layer3(layer2)  # C: 1024 (stride 16)
+        layer4 = self.backbone.layer4(layer3)  # C: 2048 (stride 32)
 
         pooled_raw = F.adaptive_avg_pool2d(layer4, 1).reshape(B, -1)  # (B, in_c5)
 
@@ -762,6 +784,7 @@ class ImprovedResNet50PoseNet(nn.Module):
         p5 = self.lat_c5(layer4)
         p4 = self.lat_c4(layer3)
         p3 = self.lat_c3(layer2)
+        p2 = self.lat_c2(layer1)
 
         p5_up = F.interpolate(p5, size=p4.shape[-2:], mode='bilinear', align_corners=False)
         p4 = p4 + p5_up
@@ -771,9 +794,17 @@ class ImprovedResNet50PoseNet(nn.Module):
         p3 = p3 + p4_up
         p3 = self.smooth3(p3)
 
-        fused = self.fuse(p3)  # (B,128,Hf,Wf)
+        fused = self.fuse(p3)  # (B,128,H/8,W/8)
 
-        heatmaps = self.heatmap_head(fused)  # (B,K,Hf,Wf) range: [0,1]
+        # decoder to produce stride-4 then stride-2 feature maps
+        up4 = F.interpolate(fused, size=p2.shape[-2:], mode='bilinear', align_corners=False)
+        up4 = torch.cat([up4, p2], dim=1)
+        up4 = self.decode4(up4)
+
+        up2 = F.interpolate(up4, scale_factor=2.0, mode='bilinear', align_corners=False)
+        up2 = self.decode2(up2)
+
+        heatmaps = self.heatmap_head(up2)  # (B,K,H/2,W/2) range: [0,1]
         heatmaps_up = F.interpolate(heatmaps, size=(H, W), mode='bilinear', align_corners=False) # (B,K,H,W) range: [0,1]
         coords_pixel = soft_argmax_2d(heatmaps_up) # (B,K,2) pixel coords
 

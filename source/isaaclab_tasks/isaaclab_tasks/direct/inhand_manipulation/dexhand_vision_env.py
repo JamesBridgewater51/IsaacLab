@@ -240,7 +240,7 @@ class DexHandVisionEnv(InHandManipulationRealEnv):
         # Clamp to [0,1]
         rgb_img = rgb_img.clamp(0, 1)
 
-        USE_DATA_AUG = False
+        USE_DATA_AUG = True
         if USE_DATA_AUG:
             # --------------------------------------------------------
             # [STEP 2] Compose augmentations using kornia.enhance and safe Kornia augmentations
@@ -360,7 +360,7 @@ class DexHandVisionEnv(InHandManipulationRealEnv):
             tensor = torch.from_numpy(image).permute(0, 3, 1, 2)  # (B,C,H,W)
             cols = int(math.ceil(math.sqrt(n_imgs)))
             grid = torchvision.utils.make_grid(tensor, nrow=cols, padding=2) # (C,H,W)
-            VIS_IMG_ONLINE = False
+            VIS_IMG_ONLINE = True
             if VIS_IMG_ONLINE:
                 _grid = grid.permute(1, 2, 0).cpu().numpy() # (H,W,C)
                 grid_bgr = cv2.cvtColor((_grid * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
@@ -448,7 +448,7 @@ class DexHandVisionEnv(InHandManipulationRealEnv):
             tensor = torch.from_numpy(image).permute(0, 3, 1, 2)  # (B,C,H,W)
             cols = int(math.ceil(math.sqrt(n_imgs)))
             grid = torchvision.utils.make_grid(tensor, nrow=cols, padding=2)
-            VIS_IMG_ONLINE = False
+            VIS_IMG_ONLINE = True
             # NOTE: this is after `step` call, so we need to subtract 1 to get the previous step.
             if VIS_IMG_ONLINE:
                 _grid = grid.permute(1, 2, 0).cpu().numpy()
